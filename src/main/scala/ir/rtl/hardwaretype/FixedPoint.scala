@@ -95,7 +95,13 @@ case class FixedPoint(magnitude: Int, fractional: Int) extends HW[Double](magnit
           if shift > 0 then
             ir.rtl.Concat(Seq(ir.rtl.Tap(cp(this.lhs), 0 until (this.lhs.hw.size - shift)),ir.rtl.Const(shift,0)))
           else
-            ir.rtl.Concat(Seq(ir.rtl.Const(-shift, 0), ir.rtl.Tap(cp(this.lhs), (-shift) until this.lhs.hw.size)))
+            val input = cp(this.lhs)
+            val rightShift = -shift
+            val sign = ir.rtl.Tap(input, (this.lhs.hw.size - 1) until this.lhs.hw.size)
+            ir.rtl.Concat(
+              Seq.fill(rightShift)(sign) :+
+                ir.rtl.Tap(input, rightShift until this.lhs.hw.size)
+            )
         case _ =>
           val shift = this.rhs.hw.asInstanceOf[FixedPoint].fractional
           ir.rtl.Tap(ir.rtl.Times(cp(this.lhs), cp(this.rhs)), shift until (shift + this.lhs.hw.size))

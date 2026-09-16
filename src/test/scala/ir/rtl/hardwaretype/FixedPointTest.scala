@@ -23,6 +23,8 @@
 
 package ir.rtl.hardwaretype
 
+import ir.rtl.{Component, Concat, Const as RTLConst, Input as RTLInput, Tap}
+import ir.rtl.signals.{Const, Input, Sig}
 import org.scalatest.funsuite.AnyFunSuite
 
 class FixedPointTest extends AnyFunSuite:
@@ -58,3 +60,38 @@ class FixedPointTest extends AnyFunSuite:
     assert(hw.valueOf(6) == -1d)
     assert(hw.valueOf(7) == -0.5d)
     assertThrows[IllegalArgumentException](hw.valueOf(8))
+
+  test("fractional power-of-two products should arithmetic-shift negatives"):
+    given hw: FixedPoint = FixedPoint(27, 3)
+    val input = Input[Double](0)
+    val inputComponent = RTLInput(hw.size, "input")
+
+    def lower(product: Sig[Double]): Component =
+      product.implement((signal, _) =>
+        if signal == input then inputComponent
+        else throw IllegalArgumentException(s"Unexpected signal $signal")
+      )
+
+    def evaluate(component: Component, inputBits: BigInt): BigInt =
+      component match
+        case current if current == inputComponent => inputBits
+        case RTLConst(_, value) => value
+        case Tap(parent, range) =>
+          (evaluate(parent, inputBits) >> range.start) &
+            ((BigInt(1) << range.size) - 1)
+        case Concat(parts) =>
+          parts.foldLeft(BigInt(0))((result, part) =>
+            (result << part.size) | evaluate(part, inputBits)
+          )
+        case other => throw IllegalArgumentException(s"Unexpected component $other")
+
+    val mask = (BigInt(1) << hw.size) - 1
+    def bits(raw: BigInt): BigInt = raw & mask
+
+    val half = lower(input * Const(0.5))
+    assert(evaluate(half, bits(-12)) == bits(-6))
+    assert(evaluate(half, bits(12)) == bits(6))
+
+    val quarter = lower(input * Const(0.25))
+    assert(evaluate(quarter, bits(-10)) == bits(-3))
+    assert(evaluate(quarter, bits(10)) == bits(2))
