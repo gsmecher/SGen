@@ -100,7 +100,12 @@ case class Temporal[U: HW] private(override val P3: Seq[Matrix[F2]], override va
 
   private def shift[T](list: Vector[T]): Vector[T] = Vector.tabulate(list.size)(i => list((i + 1) % list.size))
 
-  val basis = simplify(compBasis())
+  // The control logic below indexes these sequences with (dataset counter, chunk index), i.e. by dataset * R + chunk, and the
+  // dataset counter wraps after ceil(length / R) datasets. This is only consistent with the periodicity of the sequence if its
+  // length is a multiple of R, so we extend it cyclically to lcm(length, R).
+  private def padToChunks[T](list: Vector[T]): Vector[T] = Vector.tabulate(Utils.lcm(list.size, R))(i => list(i % list.size))
+
+  val basis = padToChunks(simplify(compBasis()))
 
   val offset1 = Vector.tabulate(1 << k)(p => 
     def compOff(offset: Vec[F2] = Vec.fromInt(t - r, 0), i: Int = 0): Vector[Vec[F2]] = 
@@ -114,7 +119,7 @@ case class Temporal[U: HW] private(override val P3: Seq[Matrix[F2]], override va
 
   override def implement(inputs: Seq[Sig[U]]): Seq[Sig[U]] = 
     require (inputs.size==K)
-    val offsetLength = Utils.lcm(offset1.map(_.size))
+    val offsetLength = Utils.lcm(Utils.lcm(offset1.map(_.size)), R)
     val offset2 = offset1.map(l => Vector.tabulate(offsetLength)(i => l(i % l.size)))
 
     val timerWrite = Timer(T)
