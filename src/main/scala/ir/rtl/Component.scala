@@ -78,6 +78,33 @@ final class Wire(override val size: Int) extends Component(size):
     case _ => false
 
 
+/**
+ * A DSP48E2 block (UltraScale and UltraScale+), instantiated as one: P = ±Z ± (W + M), with M = (D ± A) × B or A × B.
+ * Every input in use has the block's own register on it (AREG 1, DREG 1 and ADREG 1 with the pre-adder, BREG 1 or 2 so
+ * that B reaches the multiplier together with the pre-added A, CREG 1), the product has MREG and the result PREG. Z is
+ * the C input, the previous block's P through the cascade (`pcin`), or nothing; W is the rounding constant RND or
+ * nothing. The block is emitted with dont_touch, so that the implementation tools leave its registers where the
+ * generator put them (see FixedPoint.FixDsp).
+ *
+ * @param a the A port, or the pre-adder's A operand (sign-extended to the port)
+ * @param d the pre-adder's other operand: (d ± a) is multiplied
+ * @param subtractA the pre-adder computes d - a rather than d + a
+ * @param b the B port: a component, registered inside the block, or a constant tied to the port
+ * @param bWidth width of b (the constant's, for a constant)
+ * @param c the C input, shifted left by cShift and sign-extended to 48 bits
+ * @param pcin the block whose P this one continues
+ * @param negateZ the ALU computes -Z + (W + M) rather than Z + (W + M)
+ * @param negateM the ALU computes Z - (W + M) rather than Z + (W + M)
+ * @param rnd the RND constant on W; 0 leaves W unused
+ */
+final case class Dsp48(a: Component, d: Option[Component], subtractA: Boolean, b: Either[Component, BigInt], bWidth: Int,
+                       c: Option[Component], cShift: Int, pcin: Option[Dsp48], negateZ: Boolean, negateM: Boolean, rnd: BigInt)
+  extends Component(48, (Seq(a) ++ d ++ b.left.toOption ++ c ++ pcin)*):
+  def preAdd: Boolean = d.isDefined
+  def breg: Int = b match
+    case Left(_) => if preAdd then 2 else 1
+    case Right(_) => 0
+
 object Wire :
   def apply(size: Int): Wire = new Wire(size)
 
@@ -104,9 +131,12 @@ case class Input(override val size: Int, name: String) extends ImmutableComponen
 
 case class Output(input: Component, name: String) extends ImmutableComponent(input.size, input)
 
-case class Plus(terms: Seq[Component]) extends ImmutableComponent(terms.head.size, terms*)
+/** Sum of terms. With `signed`, the Verilog backend casts the terms as signed: the bits are the same, but the synthesizer only
+ *  maps a sum onto the pre-adder of a DSP block when it is a signed operation (see FixedPoint.FixDsp). */
+case class Plus(terms: Seq[Component], signed: Boolean = false) extends ImmutableComponent(terms.head.size, terms*)
 
-case class Minus(lhs: Component, rhs: Component) extends ImmutableComponent(lhs.size, lhs, rhs)
+/** Difference of two nodes; `signed` as for Plus. */
+case class Minus(lhs: Component, rhs: Component, signed: Boolean = false) extends ImmutableComponent(lhs.size, lhs, rhs)
 
 case class Times(lhs: Component, rhs: Component) extends ImmutableComponent(lhs.size + rhs.size, lhs, rhs)
 

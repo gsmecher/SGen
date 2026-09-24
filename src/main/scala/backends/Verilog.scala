@@ -164,6 +164,7 @@ object Verilog {
         case _ if split(p) => s"${getName(p)}_v${cid(f)}"
         case _ => getName(p)
       def ref(p: Component, f: Component): String = refp(p, (f, 0))
+      def cast(operand: String, signed: Boolean) = if signed then s"$$signed($operand)" else operand
       def copySource(r: Register) = r match
         case Register(input, 1, _) => ref(input, r)
         case Register(_, 2, _) => getName(r, 1)
@@ -188,7 +189,8 @@ object Verilog {
 
       val declarations = (mod.components.flatMap {
         case _: Output | _: Input | _: Const | _: Wire => Seq()
-        case cur@Mux(address, inputs) if address.size > 1 => Seq(s"reg ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
+        // ROMs small enough not to be block ROMs (see BlockROM) are kept in distributed memory, whatever the synthesizer would infer.
+        case cur@Mux(address, inputs) if address.size > 1 => Seq(s"${if inputs.forall(_.isInstanceOf[Const]) then "(* rom_style = \"distributed\" *) " else ""}reg ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
         case cur@Register(_, cycles, keep) if cycles == 1 => Seq(s"${if keep then "(* keep = \"true\" *) " else ""}reg ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
         case cur@Register(_, cycles, _) if cycles == 2 => Seq(
           s"reg ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur, 1)};",
@@ -197,6 +199,7 @@ object Verilog {
           s"reg ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur, 1)} [${cycles - 1}:0];",
           s"wire ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
         case cur: RAM => Seq(s"wire ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
+        case cur: Dsp48 => Seq(s"wire [47:0] ${getName(cur)}; wire [47:0] ${getName(cur)}_pc;")
         case cur: BlockROM => Seq(s"wire ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
         case cur => Seq(s"wire ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
       } ++ copyDeclarations :+ "integer i;" :+ (if Register.maxFanout.isDefined then "// write enables of the RAMs: one register per instance (see above)" else "reg ram_we = 1'b0; // write enable of the RAMs (see below)")).map(s => s"  $s\n").mkString("")
@@ -213,8 +216,8 @@ object Verilog {
       } ++ copyInitial).map(s => s"      $s\n").mkString("")
       val assignments = (mod.components.flatMap(cur => (cur match
         case Output(input, _) => Some(ref(input, cur))
-        case Plus(terms) => Some(terms.map(ref(_, cur)).mkString(" + "))
-        case Minus(lhs, rhs) => Some(s"${ref(lhs, cur)} - ${ref(rhs, cur)}")
+        case Plus(terms, signed) => Some(terms.map(t => cast(ref(t, cur), signed)).mkString(" + "))
+        case Minus(lhs, rhs, signed) => Some(s"${cast(ref(lhs, cur), signed)} - ${cast(ref(rhs, cur), signed)}")
         case Times(lhs, rhs) => Some(s"$$signed(${ref(lhs, cur)}) * $$signed(${ref(rhs, cur)})")
         case And(terms) => Some(terms.map(ref(_, cur)).mkString(" & "))
         case Xor(inputs) => Some(inputs.map(ref(_, cur)).mkString(" ^ "))
@@ -268,6 +271,50 @@ object Verilog {
         case cur@BlockROM(values, address, _) =>
           val cfg = BlockRAMConfig(values.size, cur.size).get
           blockMemory(getName(cur), getName(cur, 1), cfg, cur.size, address.size, ref(address, cur), None, Some(values))
+        case cur: Dsp48 =>
+          // One DSP48E2 per block, every register setting explicit (see ir.rtl.Dsp48 and FixedPoint.FixDsp). Inferring
+          // the blocks from arithmetic left the mapping to the synthesizer, which absorbed or declined the operand
+          // registers case by case, and to the physical optimiser, which moved them.
+          def sext(comp: Component, w: Int): String = comp match
+            case Const(size, value) =>
+              val v = if size > 0 && value.testBit(size - 1) then value - (BigInt(1) << size) else value
+              s"$w'd${v & ((BigInt(1) << w) - 1)}"
+            case _ if comp.size >= w => s"${ref(comp, cur)}[${w - 1}:0]"
+            case _ => s"{{${w - comp.size}{${ref(comp, cur)}[${comp.size - 1}]}}, ${ref(comp, cur)}}"
+          val pre = cur.preAdd
+          val breg = cur.breg
+          val aStr = sext(cur.a, 30)
+          val dStr = cur.d.map(sext(_, 27)).getOrElse("27'b0")
+          val bStr = cur.b match
+            case Left(comp) => sext(comp, 18)
+            case Right(value) => s"18'd${value & 0x3ffff}"
+          val cStr = cur.c.map {
+            case Const(size, value) =>
+              val v = if size > 0 && value.testBit(size - 1) then value - (BigInt(1) << size) else value
+              s"48'd${(v << cur.cShift) & ((BigInt(1) << 48) - 1)}"
+            case comp =>
+              val ext = 48 - comp.size - cur.cShift
+              val parts = (if ext > 0 then Seq(s"{$ext{${ref(comp, cur)}[${comp.size - 1}]}}") else Seq()) ++ Seq(ref(comp, cur)) ++ (if cur.cShift > 0 then Seq(s"${cur.cShift}'b0") else Seq())
+              if parts.size == 1 then parts.head else parts.mkString("{", ", ", "}")
+          }.getOrElse("48'b0")
+          val opmode = s"9'b${if cur.rnd != 0 then "10" else "00"}_${if cur.pcin.isDefined then "001" else if cur.c.isDefined then "011" else "000"}_01_01"
+          val alumode = (cur.negateZ, cur.negateM) match
+            case (false, false) => "0000"
+            case (false, true) => "0011"
+            case (true, false) => "0001"
+            case (true, true) => "0010"
+          val inmode = if pre then (if cur.subtractA then "5'b01100" else "5'b00100") else "5'b00000"
+          Seq(
+            "(* dont_touch = \"true\" *) DSP48E2 #(",
+            s"  .AMULTSEL(\"${if pre then "AD" else "A"}\"), .A_INPUT(\"DIRECT\"), .BMULTSEL(\"B\"), .B_INPUT(\"DIRECT\"), .PREADDINSEL(\"A\"), .RND(48'd${cur.rnd}), .USE_MULT(\"MULTIPLY\"), .USE_SIMD(\"ONE48\"), .USE_WIDEXOR(\"FALSE\"), .XORSIMD(\"XOR24_48_96\"),",
+            "  .AUTORESET_PATDET(\"NO_RESET\"), .AUTORESET_PRIORITY(\"RESET\"), .MASK(48'h3fffffffffff), .PATTERN(48'h000000000000), .SEL_MASK(\"MASK\"), .SEL_PATTERN(\"PATTERN\"), .USE_PATTERN_DETECT(\"NO_PATDET\"),",
+            s"  .ACASCREG(1), .ADREG(${if pre then 1 else 0}), .ALUMODEREG(0), .AREG(1), .BCASCREG($breg), .BREG($breg), .CARRYINREG(0), .CARRYINSELREG(0), .CREG(${if cur.c.isDefined then 1 else 0}), .DREG(${if pre then 1 else 0}), .INMODEREG(0), .MREG(1), .OPMODEREG(0), .PREG(1)",
+            s") ${getName(cur)}_dsp (",
+            s"  .P(${getName(cur)}), .PCOUT(${getName(cur)}_pc), .ACOUT(), .BCOUT(), .CARRYCASCOUT(), .CARRYOUT(), .MULTSIGNOUT(), .OVERFLOW(), .PATTERNBDETECT(), .PATTERNDETECT(), .UNDERFLOW(), .XOROUT(),",
+            s"  .A($aStr), .B($bStr), .C($cStr), .D($dStr), .PCIN(${cur.pcin.map(p => s"${getName(p)}_pc").getOrElse("48'b0")}), .ACIN(30'b0), .BCIN(18'b0), .CARRYCASCIN(1'b0), .MULTSIGNIN(1'b0), .CARRYIN(1'b${if cur.negateZ then 1 else 0}),",
+            s"  .ALUMODE(4'b$alumode), .CARRYINSEL(3'b000), .INMODE($inmode), .OPMODE($opmode), .CLK(clk),",
+            s"  .CEA1(1'b0), .CEA2(1'b1), .CEAD(1'b${if pre then 1 else 0}), .CEALUMODE(1'b0), .CEB1(1'b${if breg == 2 then 1 else 0}), .CEB2(1'b${if breg >= 1 then 1 else 0}), .CEC(1'b${if cur.c.isDefined then 1 else 0}), .CECARRYIN(1'b0), .CECTRL(1'b0), .CED(1'b${if pre then 1 else 0}), .CEINMODE(1'b0), .CEM(1'b1), .CEP(1'b1),",
+            "  .RSTA(1'b0), .RSTALLCARRYIN(1'b0), .RSTALUMODE(1'b0), .RSTB(1'b0), .RSTC(1'b0), .RSTCTRL(1'b0), .RSTD(1'b0), .RSTINMODE(1'b0), .RSTM(1'b0), .RSTP(1'b0));")
         case cur: Extern =>
           mod.dependencies.add(cur.filename)
           Seq(s"${cur.module} ext_${getName(cur)}(${cur.inputs.map { case (name, comp) => s".$name(${ref(comp, cur)}), " }.mkString}.${cur.outputName}(${getName(cur)}));")
