@@ -38,7 +38,12 @@ lazy val root = (project in file("."))
       s"${today.getYear % 100}.${today.getMonthValue}.${today.getDayOfMonth}"
     },
     scalaVersion := "3.7.3",
-    buildInfoKeys := Seq[BuildInfoKey](name, version, scalaVersion, sbtVersion),
+    buildInfoKeys := Seq[BuildInfoKey](name, version, scalaVersion, sbtVersion,
+      BuildInfoKey.action("gitCommit") { // identifies the generator build in the generated designs
+        val commit = scala.util.Try(scala.sys.process.Process("git rev-parse --short HEAD").!!.trim).getOrElse("unknown")
+        val dirty = scala.util.Try(scala.sys.process.Process("git status --porcelain --untracked-files=no").!!.trim.nonEmpty).getOrElse(false)
+        if (dirty) s"$commit (modified)" else commit
+      }),
     inConfig(SimTest)(Defaults.testTasks),
     inConfig(SynthTest)(Defaults.testTasks),
     inConfig(RegularTest)(Defaults.testTasks),

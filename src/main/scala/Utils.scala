@@ -45,7 +45,7 @@ package object Utils:
     val source = scala.io.Source.fromResource(s"$name.txt")
     val res = source.getLines.map(indent + _ + "\n").mkString
     source.close
-    res.replace("{version}", BuildInfo.version)
+    res.replace("{version}", BuildInfo.version).replace("{commit}", BuildInfo.gitCommit)
 
   /**
    * Creates an iterator that generates `BigInt` values in a specified range.
