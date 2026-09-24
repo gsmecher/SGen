@@ -63,6 +63,8 @@ sgen.bat [options] <transform‑name> [lp matrices...]
 | `-singleported`   | – | Uses single‑ported RAM (read = write address). May increase latency.                                                                                                     |
 | `-zip`   | – | Packs the design and all dependencies (e.g. FloPoCo modules) into a zip archive.                                                                                         |
 | `-hw`   | `<repr>`| Hardware arithmetic representation of the input data (see the table below).                                                                                              |
+| `-inorder` | `natural` \| `digitrev` \| `transposed` \| `bits:b0,b1,...` | Order of the inputs of a DFT (default `natural`). `digitrev` omits the initial reordering (the input is expected in radix-2^r digit-reversed order); `transposed` expects element i on port i / 2^(n-k) during cycle i mod 2^(n-k); `bits:` gives an arbitrary bit permutation: bit j of the stream position (bits 0 to k-1 the port, then the cycle, least significant first) is bit b_j of the element index. `digitrev` saves memory and latency; `transposed` output costs nothing when r = k. |
+| `-outorder` | `natural` \| `digitrev` \| `transposed` \| `bits:...` | Order of the outputs of a DFT (default `natural`), with the same meanings as `-inorder`. |
 | `-bramthreshold` | `<depth>` | Minimum depth for a memory to be implemented in block RAM (default 128). Shallower memories use distributed RAM. |
 
 #### Hardware data‑type (`-hw`)

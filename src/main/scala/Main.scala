@@ -29,7 +29,7 @@ import ir.rtl.{AcyclicStreamingModule, RAMControl, StreamingModule}
 import maths.fields.F2
 import maths.linalg.Matrix
 import transforms.Transform
-import transforms.fft.{CTDFT, DFT, ICTDFT, IItPeaseFused, ItPeaseFused, Swap}
+import transforms.fft.{CTDFT, DFT, ICTDFT, IItPeaseFused, ItPeaseFused, Order, Swap}
 import transforms.perm.LinearPerm
 import transforms.wht
 
@@ -51,6 +51,8 @@ object Main:
     var zip = false
     var logo = true
     var scalingFactor = "1"
+    var inputOrder = "natural"
+    var outputOrder = "natural"
 
     var _n: Option[Int] = None
     def n: Int = _n match
@@ -92,6 +94,13 @@ object Main:
     var _filename: Option[String] = None
     def filename(default: String) = _filename.getOrElse(default)
     def filename_=(value:String) = _filename = Some(value)
+
+    def parseOrder(name: String): Order = name match
+      case "natural" => Order.Natural
+      case "digitrev" => Order.DigitReversed
+      case "transposed" => Order.Transposed(k)
+      case s"bits:$bits" => Order.Bits(bits.split(',').toSeq.map(_.trim.toInt))
+      case other => throw new IllegalArgumentException(s"Unknown order: $other (expected natural, digitrev, transposed or bits:b0,b1,...)")
 
     def control = if singlePortedRAM then RAMControl.SinglePorted else if dualRAMControl then RAMControl.Dual else RAMControl.Single
 
@@ -141,6 +150,8 @@ object Main:
       case "-hw" => _hw = parseHW(argsQ)
       case "-o" => _filename = argsQ.removeHeadOption()
       case "-sf" => scalingFactor = argsQ.dequeue()
+      case "-inorder" => inputOrder = argsQ.dequeue().toLowerCase
+      case "-outorder" => outputOrder = argsQ.dequeue().toLowerCase
       case "-bramthreshold" => ir.rtl.RAM.blockDepth = Numeric[Int].parseString(argsQ.dequeue()).getOrElse(throw new IllegalArgumentException("Parameter bramthreshold should be an integer."))
       case "-testbench" => testbench = true
       case "-dualramcontrol" => dualRAMControl = true
@@ -167,13 +178,13 @@ object Main:
       case "wht" => finish(wht.CTWHT(n, r, hw.num.parseString(scalingFactor).get)(using hw.num), hw.asInstanceOf)
       case "whtcompact" => finish(wht.ItPeaseFused(n, r, hw.num.parseString(scalingFactor).get)(using hw.num), hw.asInstanceOf)
       case "dft" => hw match
-        case hw: ComplexHW[Double@unchecked] => finish(CTDFT(n, rs, hw.num.parseString(scalingFactor).get), hw)
+        case hw: ComplexHW[Double@unchecked] => finish(CTDFT(n, rs, hw.num.parseString(scalingFactor).get, parseOrder(inputOrder), parseOrder(outputOrder)), hw)
         case _ => throw new IllegalArgumentException("DFT requires a complex of fractional hardware datatype.")
       case "dftcompact" => hw match
         case hw: ComplexHW[Double@unchecked] => finish(ItPeaseFused(n, r, hw.num.parseString(scalingFactor).get), hw)
         case _ => throw new IllegalArgumentException("Compact DFT requires a complex of fractional hardware datatype.")
       case "idft" => hw match
-        case hw: ComplexHW[Double@unchecked] => finish(ICTDFT(n, rs, hw.num.parseString(scalingFactor).get), hw)
+        case hw: ComplexHW[Double@unchecked] => finish(ICTDFT(n, rs, hw.num.parseString(scalingFactor).get, parseOrder(inputOrder), parseOrder(outputOrder)), hw)
         case _ => throw new IllegalArgumentException("iDFT requires a complex of fractional hardware datatype.")
       case "idftcompact" => hw match
         case hw: ComplexHW[Double@unchecked] => finish(IItPeaseFused(n, r, hw.num.parseString(scalingFactor).get), hw)

@@ -77,35 +77,71 @@ abstract class DFT(n: Int) extends HighLevelTransform[Complex[Double]](n):
     val inputs3 = Seq.tabulate(1 << n)(k => if k == 0 then Complex(hw.MID_VALUE) else Complex(0.0)) // Fourth set is a dirac
     inputs0 ++ inputs1 ++ inputs2 ++ inputs3
   
+/** Order of the elements of a dataset at the input or output of a streaming DFT, for a streaming width of 2^k and datasets of 2^n elements. */
+enum Order:
+  /** Element i of the dataset is at stream position i, i.e. on port i mod 2^k during cycle i / 2^k. */
+  case Natural
+  /** The order used internally by the Cooley-Tukey algorithm (digit reversal, with the digits of the radices used); the corresponding reordering is omitted. */
+  case DigitReversed
+  /** Element i is on port i / 2^(n-k) during cycle i mod 2^(n-k): each port carries a contiguous block of the dataset. */
+  case Transposed(k: Int)
+  /** Any bit permutation: bit j of the stream position (bits 0 to k-1 the port, bits k to n-1 the cycle, least significant first) is bit bits(j) of the element index. */
+  case Bits(bits: Seq[Int])
+
 /**
- * Mixed-radix Cooley-Tukey FFT.
+ * Streaming mixed-radix Cooley-Tukey DFT.
  *
  * @param n             Log of the size of the transform
  * @param rs            Log of the radix of each stage, in the order the stages are applied to the data (the first stage
  *                      requires no twiddle factors). The sum must be n.
  * @param scalingFactor Scaling factor applied by each radix-2 butterfly
+ * @param inputOrder    Order of the inputs. Orders other than Natural save memory and latency (Transposed costs nothing for a uniform radix r = k).
+ * @param outputOrder   Order of the outputs.
  */
-case class CTDFT(override val n: Int, rs: Seq[Int], scalingFactor: Complex[Double]) extends DFT(n):
+case class CTDFT(override val n: Int, rs: Seq[Int], scalingFactor: Complex[Double], inputOrder: Order = Order.Natural, outputOrder: Order = Order.Natural) extends DFT(n):
   require(rs.nonEmpty && rs.forall(_ > 0) && rs.sum == n, s"radices ($rs) must be strictly positive and sum up to n ($n)")
 
   override val spl: SPL[Complex[Double]] =
     if n == 1 then
       DFT2(scalingFactor)
     else
-      val stages = rs.reverse // SPL factors, and the stage index l of DiagE, Qmat and Rmat, are in product order: the stage applied last comes first.
-      Lmat(stages.head, n) * Product(stages.size)(l => ITensor(n - stages(l), CTDFT(stages(l), 1, scalingFactor).spl) * DiagE(n, stages, l) * Qmat(n, stages, l)) * Rmat(n, stages)
+      val radices = rs.reverse // SPL factors, and the stage index l of DiagE, Qmat and Rmat, are in product order: the stage applied last comes first.
+      val stages = Product(radices.size)(l => ITensor(n - radices(l), CTDFT(radices(l), 1, scalingFactor).spl) * DiagE(n, radices, l) * Qmat(n, radices, l))
+      val withInput = inputOrder match
+        case Order.Natural => stages * Rmat(n, radices)
+        case Order.DigitReversed => stages
+        case Order.Transposed(k) => stages * LinearPerm[Complex[Double]](Rmat(n, radices) * transposition(k).inverse)
+        case Order.Bits(bits) => stages * LinearPerm[Complex[Double]](Rmat(n, radices) * bitPerm(bits).inverse)
+      outputOrder match
+        case Order.Natural => Lmat(radices.head, n) * withInput
+        case Order.DigitReversed => withInput
+        case Order.Transposed(k) => LinearPerm[Complex[Double]](transposition(k) * Lmat(radices.head, n)) * withInput
+        case Order.Bits(bits) => LinearPerm[Complex[Double]](bitPerm(bits) * Lmat(radices.head, n)) * withInput
+
+  /** Bit matrix mapping the index of an element to its stream position (cycle, port) in the transposed order, for 2^k ports.
+   *  On the output side it is applied after Lmat (position of the element that the algorithm produces); on the input side the
+   *  algorithm consumes stream positions, so the inverse is needed there. */
+  private def transposition(k: Int): Matrix[F2] = Cmat(n) ^ k
+
+  /** Bit matrix of an arbitrary bit permutation (see Order.Bits); the matrices here index bits most significant first. */
+  private def bitPerm(bits: Seq[Int]): Matrix[F2] =
+    require(bits.size == n && bits.sorted == (0 until n), s"the order must list each of the $n bits of the element index once")
+    Matrix.tabulate[F2](n, n)((i, j) => F2(bits(n - 1 - i) == n - 1 - j))
+
 
 object CTDFT:
   /** Cooley-Tukey FFT using the radix 2^r as often as possible (uniform radix-2^r FFT if r divides n). */
   def apply(n: Int, r: Int, scalingFactor: Complex[Double]): CTDFT = CTDFT(n, DFT.greedyRadices(n, r), scalingFactor)
+  def apply(n: Int, r: Int, scalingFactor: Complex[Double], inputOrder: Order, outputOrder: Order): CTDFT = CTDFT(n, DFT.greedyRadices(n, r), scalingFactor, inputOrder, outputOrder)
 
 /** Mixed-radix inverse Cooley-Tukey FFT, see [[CTDFT]]. */
-case class ICTDFT(override val n: Int, rs: Seq[Int], scalingFactor: Complex[Double]) extends DFT(n):
-  override val spl: SPL[Complex[Double]] = Swap(n) * CTDFT(n, rs, scalingFactor).spl * Swap(n)
+case class ICTDFT(override val n: Int, rs: Seq[Int], scalingFactor: Complex[Double], inputOrder: Order = Order.Natural, outputOrder: Order = Order.Natural) extends DFT(n):
+  override val spl: SPL[Complex[Double]] = Swap(n) * CTDFT(n, rs, scalingFactor, inputOrder, outputOrder).spl * Swap(n)
 
 object ICTDFT:
   /** Inverse Cooley-Tukey FFT using the radix 2^r as often as possible (uniform radix-2^r FFT if r divides n). */
   def apply(n: Int, r: Int, scalingFactor: Complex[Double]): ICTDFT = ICTDFT(n, DFT.greedyRadices(n, r), scalingFactor)
+  def apply(n: Int, r: Int, scalingFactor: Complex[Double], inputOrder: Order, outputOrder: Order): ICTDFT = ICTDFT(n, DFT.greedyRadices(n, r), scalingFactor, inputOrder, outputOrder)
 
 case class Pease(override val n: Int, r: Int, scalingFactor: Complex[Double]) extends DFT(n):
   require(n % r == 0, s"n ($n) must be a multiple of r ($r)")
