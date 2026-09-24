@@ -28,23 +28,28 @@ import ir.rtl.hardwaretype.{HW, Unsigned}
 
 /** Signal that represents a RAM which read and write addresses are controled by two independent signals */
 case class DualControlRAM[U](input: Sig[U], addrWr: Sig[Int], addrRd: Sig[Int], latency: Int) extends Sig[U](using input.hw):
-  override def parents: Seq[(Sig[?], Int)] = Seq((input, latency + 2), (addrWr, latency + 2), (addrRd, 1))
+  private val timeRd: Int = ir.rtl.RAM.readLatency
+  private val timeWr: Int = latency + 1 + timeRd
 
-  override val pipeline = 1
+  override def parents: Seq[(Sig[?], Int)] = Seq((input, timeWr), (addrWr, timeWr), (addrRd, timeRd))
 
-  override def implement(cp: (Sig[?], Int) => Component): Component = ir.rtl.RAM(cp(input, latency + 2), cp(addrWr, latency + 2), cp(addrRd, 1))
+  override val pipeline = 1 // register between the RAM and the next stage
+
+  override def implement(cp: (Sig[?], Int) => Component): Component = ir.rtl.RAM(cp(input, timeWr), cp(addrWr, timeWr), cp(addrRd, timeRd))
   
   override val hash = Seq(input,addrWr,latency).hashCode()
 
 /** Signal that represents a RAM which read and write addresses are controled by the same signal */
 case class SingleControlRAM[U](input: Sig[U], addrWr: Sig[Int], latency: Int, T: Int) extends Sig[U](using input.hw):
-  private val timeRd: Int = T + 1
+  // The read latency shifts both ports by the same amount, so that their relative timing (and hence read/write collisions) is unchanged.
+  private val timeRd: Int = T + ir.rtl.RAM.readLatency
+  private val timeWr: Int = latency + 1 + ir.rtl.RAM.readLatency
 
-  override def parents: Seq[(Sig[?], Int)] = Seq((input, latency + 2), (addrWr, latency + 2), (addrWr, timeRd))
+  override def parents: Seq[(Sig[?], Int)] = Seq((input, timeWr), (addrWr, timeWr), (addrWr, timeRd))
 
-  override val pipeline = 1
+  override val pipeline = 1 // register between the RAM and the next stage
 
-  override def implement(cp: (Sig[?], Int) => Component): Component = ir.rtl.RAM(cp(input, latency + 2), cp(addrWr, latency + 2), cp(addrWr, timeRd))
+  override def implement(cp: (Sig[?], Int) => Component): Component = ir.rtl.RAM(cp(input, timeWr), cp(addrWr, timeWr), cp(addrWr, timeRd))
   
   override val hash = Seq(input,addrWr,latency).hashCode()
 

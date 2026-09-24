@@ -141,6 +141,7 @@ object Main:
       case "-hw" => _hw = parseHW(argsQ)
       case "-o" => _filename = argsQ.removeHeadOption()
       case "-sf" => scalingFactor = argsQ.dequeue()
+      case "-bramthreshold" => ir.rtl.RAM.blockDepth = Numeric[Int].parseString(argsQ.dequeue()).getOrElse(throw new IllegalArgumentException("Parameter bramthreshold should be an integer."))
       case "-testbench" => testbench = true
       case "-dualramcontrol" => dualRAMControl = true
       case "-singleportedram" => singlePortedRAM = true

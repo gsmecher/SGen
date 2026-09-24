@@ -32,7 +32,14 @@ case class Mux[U] private(address: Sig[Int], inputs: Seq[Sig[U]]) extends Operat
   /** Returns whether the multiplexer is a ROM */
   def isRom: Boolean = inputs.forall(_.isInstanceOf[Const[?]])
 
-  override def implement(implicit cp: Sig[?] => Component): Component = ir.rtl.Mux(cp(address), inputs.map(cp))
+  /** Whether this is a ROM implemented in a block RAM primitive, in which case it has a read latency */
+  def isBlockRom: Boolean = isRom && ir.rtl.BlockRAMConfig(inputs.size, hw.size).isDefined
+
+  override def latency: Int = if isBlockRom then ir.rtl.RAM.readLatency else 0
+
+  override def implement(implicit cp: Sig[?] => Component): Component =
+    if isBlockRom then ir.rtl.BlockROM(inputs.map { case c: Const[?] => c.bits }, cp(address), hw.size)
+    else ir.rtl.Mux(cp(address), inputs.map(cp))
 
   override val pipeline = 1
 
@@ -64,6 +71,8 @@ object Mux:
             val control = address(pos + 1 until address.hw.size) :: address(0 until pos)
             Mux(control, inputs.indices.filter(i => (i & (1 << pos)) == 0).map(inputs(_)))
           case _ => hw match
+            // Large complex ROMs are kept whole, so that real and imaginary parts share one block RAM primitive.
+            case ComplexHW(_) if inputs.forall(_.isInstanceOf[Const[?]]) && ir.rtl.BlockRAMConfig(inputs.size, hw.size).isDefined => new Mux(address, inputs)
             case ComplexHW(_) => Cpx(Mux(address, inputs.map(_.asInstanceOf[Sig[Complex[AnyRef]]].re)), Mux(address, inputs.map(_.asInstanceOf[Sig[Complex[AnyRef]]].im))).asInstanceOf[Sig[U]]
             case Unsigned(_) => (0 until hw.size).find(i => // search for a bit that is always the same across values
               val ref = inputs.head.asInstanceOf[Sig[Int]](i)

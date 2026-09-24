@@ -63,6 +63,7 @@ sgen.bat [options] <transform‑name> [lp matrices...]
 | `-singleported`   | – | Uses single‑ported RAM (read = write address). May increase latency.                                                                                                     |
 | `-zip`   | – | Packs the design and all dependencies (e.g. FloPoCo modules) into a zip archive.                                                                                         |
 | `-hw`   | `<repr>`| Hardware arithmetic representation of the input data (see the table below).                                                                                              |
+| `-bramthreshold` | `<depth>` | Minimum depth for a memory to be implemented in block RAM (default 128). Shallower memories use distributed RAM. |
 
 #### Hardware data‑type (`-hw`)
 
