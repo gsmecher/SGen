@@ -150,6 +150,7 @@ object Main:
       case "-hw" => _hw = parseHW(argsQ)
       case "-o" => _filename = argsQ.removeHeadOption()
       case "-sf" => scalingFactor = argsQ.dequeue()
+      case "-norounding" => FixedPoint.rounding = false
       case "-inorder" => inputOrder = argsQ.dequeue().toLowerCase
       case "-outorder" => outputOrder = argsQ.dequeue().toLowerCase
       case "-bramthreshold" => ir.rtl.RAM.blockDepth = Numeric[Int].parseString(argsQ.dequeue()).getOrElse(throw new IllegalArgumentException("Parameter bramthreshold should be an integer."))
