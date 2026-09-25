@@ -145,6 +145,7 @@ object Verilog {
       }.map(s => s"  $s\n").mkString("")
 
       val result = new StringBuilder
+      result ++= "`timescale 1ns/1ps // the design is clock-period agnostic; a directive lets it elaborate alongside modules that have one (XPM, unisim)\n"
       result ++= s"module main(input clk,\n"
       result ++= mod.inputs.map(s => s"  input ${if (s.size != 1) s"[${s.size - 1}:0] " else ""}${getName(s)},\n").mkString("")
       result ++= mod.outputs.map(s => s"  output ${if (s.size != 1) s"[${s.size - 1}:0] " else ""}${getName(s)}").mkString(",\n")
