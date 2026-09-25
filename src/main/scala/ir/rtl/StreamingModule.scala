@@ -51,11 +51,12 @@ abstract class StreamingModule[U: HW](val t: Int, val k: Int) extends Module:
     filterNot(s=> s.contains ("full-throughput") && minGap!=0).
     filterNot(s=> s.contains ("requires a delay") && minGap==0).
     filterNot(s=>(s.contains ("single RAM control") || s.contains("additional cycles") || s.contains ("-dualRAMcontrol")) && !hasSinglePortedMem).
+    filterNot(s=>(s.contains("index_out") || s.contains("valid_out")) && !StreamingModule.indexOutputs).
     map(_.
     replace("SIZE",N.toString).
     replace("DATADURATION",T.toString).
     replace("STREAMINGWIDTH",K.toString).
-      replace("LATENCY",latency.toString).
+      replace("LATENCY",(latency + inputDelay).toString).
       replace("TOTALGAP",(minGap+T).toString).
       replace("GAP",minGap.toString).
       replace("INPUTS",s"i0 - i${K-1}").
@@ -84,29 +85,53 @@ abstract class StreamingModule[U: HW](val t: Int, val k: Int) extends Module:
 
     def getToken(time: Int) = tokens.getOrElseUpdate(time, Wire(1))
 
-    val res = implement(reset, getToken, dataInputs).zipWithIndex.map { case (comp, i) => Output(comp, "o" + i) }
+    // The data inputs go through wires, so that they can be delayed once the time at which the token is needed is known.
+    val dataWires = dataInputs.map(i => Wire(i.size))
+    val res = implement(reset, getToken, dataWires).zipWithIndex.map { case (comp, i) => Output(comp, "o" + i) }
     val next_out = Output(getToken(latency), "next_out")
 
+    // Time (in cycles after the first input) at which the token is first needed by the control logic.
     val minTime = tokens.keys.min
+    // With StreamingModule.alignNext, next is asserted with the first input: if the control logic needs the token before the first
+    // input, the data is delayed accordingly (at the cost of registers or shift-register LUTs), and if it needs it after, the token is.
+    val delay = if StreamingModule.alignNext then math.max(0, -minTime) else 0
+    dataWires.zip(dataInputs).foreach((w, i) => w.input = i.delay(delay))
+    val tokenStart = if StreamingModule.alignNext then math.min(minTime, 0) else minTime
 
-    if false then
-      val maxTime = tokens.keys.max
-      val tokenComps: Vector[Component] = Vector.iterate[Component](next, maxTime - minTime + 1)(_.register)
-      tokens.foreach { case (time, wire) => wire.input = tokenComps(time - minTime) }
-    else
-      tokens.toSeq.sortBy(_._1).foldLeft[(Int,Component)]((minTime,next)){case ((prevTime, prevComp),(time, wire)) =>
-        val diff= time-prevTime
-        assert(diff>=0)
-        val res = if diff>0 then Register(prevComp, diff) else prevComp
-        wire.input = res
-        (time, res)}
+    tokens.toSeq.sortBy(_._1).foldLeft[(Int,Component)]((tokenStart,next)){case ((prevTime, prevComp),(time, wire)) =>
+      val diff= time-prevTime
+      assert(diff>=0)
+      val res = if diff>0 then Register(prevComp, diff) else prevComp
+      wire.input = res
+      (time, res)}
 
-    _nextAt = Some(minTime)
+    _nextAt = Some(if StreamingModule.alignNext then 0 else minTime)
+    _inputDelay = Some(delay)
 
-    next_out +: res
+    // Index of the current output within its dataset, and whether the outputs are part of a dataset (StreamingModule.indexOutputs).
+    val indexOutputs = if StreamingModule.indexOutputs && t > 0 then
+      val token = next_out.input
+      val count = new Wire(t) // value of the index at the previous cycle, plus one
+      val index = Mux(token, Seq(count, Const(t, 0)))
+      count.input = Register(Plus(Seq(index, Const(t, 1))))
+      val active = new Wire(1)
+      val valid = Or(Seq(token, active))
+      val activeNext = Mux(token, Seq(Mux(Equals(index, Const(t, T - 1)), Seq(active, Const(1, 0))), Const(1, 1)))
+      active.input = Register(Mux(reset, Seq(activeNext, Const(1, 0)))) // cleared by reset, so that valid_out is defined before the first dataset
+      Seq(Output(index, "index_out"), Output(valid, "valid_out"))
+    else Seq()
+
+    next_out +: res :++ indexOutputs
 
 
-  final lazy val dataOutputs: Seq[Output] = outputs.drop(1)
+  final lazy val dataOutputs: Seq[Output] = outputs.drop(1).take(K)
+
+  private var _inputDelay: Option[Int] = None
+
+  /** Number of cycles the inputs are delayed by before entering the design (see StreamingModule.alignNext) */
+  final def inputDelay: Int =
+    if (_inputDelay.isEmpty) outputs
+    _inputDelay.get
 
   final lazy val next_out: Output = outputs.head
 
@@ -119,3 +144,10 @@ abstract class StreamingModule[U: HW](val t: Int, val k: Int) extends Module:
   //final def eval(inputs: Seq[BigInt], set: Int): Seq[BigInt] = spl.eval(inputs.map(hw.valueOf), set).map(hw.bitsOf)
 
   def testBenchInput(repeat:Int): Seq[U]=(0 until repeat*N).map(i=>hw.num.fromInt(i))
+
+object StreamingModule:
+  /** Whether next is asserted together with the first input of a dataset, rather than when the control logic first needs it */
+  var alignNext: Boolean = false
+
+  /** Whether the design has index_out and valid_out outputs (index of the current output within its dataset, and whether it is part of one) */
+  var indexOutputs: Boolean = false

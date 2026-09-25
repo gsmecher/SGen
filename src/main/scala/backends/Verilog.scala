@@ -243,7 +243,7 @@ object Verilog {
       res ++= "      begin\n"
       res ++= "        @(posedge clk);\n"
       res ++= "        next <= 0;\n"
-      (0 to (sm.latency - sm.nextAt + sm.T)).foreach(_ => res ++= "        @(posedge clk);\n")
+      (0 to (sm.latency + sm.inputDelay - sm.nextAt + sm.T)).foreach(_ => res ++= "        @(posedge clk);\n")
       res ++= "        rst <= 1;\n"
       res ++= "        @(posedge clk);\n"
       res ++= "        @(posedge clk);\n"
