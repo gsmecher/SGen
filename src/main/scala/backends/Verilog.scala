@@ -72,6 +72,17 @@ object Verilog {
         case cur: BlockROM => Seq(s"wire ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
         case cur => Seq(s"wire ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
       }:+"integer i;":+"reg ram_we = 1'b0; // write enable of the RAMs (see below)").map(s => s"  $s\n").mkString("")
+
+      // Power-up values of the registers (zero, as on an FPGA), so that a simulation starts in the state the hardware starts in: reset
+      // does not clear the control token chains, which would otherwise stay undefined for as long as the latency of the design. Written
+      // as an initial block after the combinational blocks rather than as declaration initialisers, so that the first evaluation of
+      // the always @(*) blocks sees them (they only run on an event, and a declaration initialiser is not one).
+      val initial = mod.components.flatMap {
+        case cur@Register(_, cycles) if cycles == 1 => Seq(s"${getName(cur)} = 0;")
+        case cur@Register(_, cycles) if cycles == 2 => Seq(s"${getName(cur, 1)} = 0;", s"${getName(cur)} = 0;")
+        case cur@Register(_, cycles) => Seq(s"for (i = 0; i < $cycles; i = i + 1) ${getName(cur, 1)}[i] = 0;")
+        case _ => Seq()
+      }.map(s => s"      $s\n").mkString("")
       val resetName = mod.inputs.collectFirst { case Input(_, name) if name == "reset" => name }.getOrElse("1'b0")
 
       val assignments = mod.components.flatMap(cur => (cur match
@@ -141,6 +152,10 @@ object Verilog {
       result ++= declarations
       result ++= assignments
       result ++= combinatorial
+      if initial.nonEmpty then
+        result ++= "  initial\n    begin\n"
+        result ++= initial
+        result ++= "    end\n"
       if sequential.nonEmpty then
         result ++= "  always @(posedge clk)\n"
         result ++= "    begin\n"
