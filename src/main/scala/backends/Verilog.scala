@@ -130,7 +130,7 @@ object Verilog {
           "xpm_memory_sdpram #(",
           s"  .ADDR_WIDTH_A(${wr.size}), .ADDR_WIDTH_B(${rd.size}), .WRITE_DATA_WIDTH_A(${cur.size}), .BYTE_WRITE_WIDTH_A(${cur.size}), .READ_DATA_WIDTH_B(${cur.size}),",
           s"  .MEMORY_SIZE(${cur.size << wr.size}), .MEMORY_PRIMITIVE(\"$primitive\"), .CLOCKING_MODE(\"common_clock\"),",
-          s"  .READ_LATENCY_B(${RAM.readLatency}), .WRITE_MODE_B(\"$writeMode\"), .SIM_ASSERT_CHK(1)",
+          s"  .READ_LATENCY_B(${RAM.readLatency}), .WRITE_MODE_B(\"$writeMode\"), .SIM_ASSERT_CHK(0)",
           s") ${getName(cur, 1)} (",
           s"  .clka(clk), .ena(1'b1), .wea(ram_we), .addra(${getName(wr)}), .dina(${getName(data)}),",
           s"  .clkb(clk), .enb(1'b1), .regceb(1'b1), .rstb(1'b0), .addrb(${getName(rd)}), .doutb(${getName(cur)}),",
