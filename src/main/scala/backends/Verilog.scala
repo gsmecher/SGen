@@ -126,15 +126,23 @@ object Verilog {
           // address before rewriting it). Vivado maps an XPM RAM whose write enable is a constant to READ_FIRST whatever the write mode
           // says, hence the registered enable. Distributed RAMs only support READ_FIRST.
           val (primitive, writeMode) = if (1 << wr.size) >= RAM.blockDepth then ("block", "no_change") else ("distributed", "read_first")
-          Seq(
-          "xpm_memory_sdpram #(",
-          s"  .ADDR_WIDTH_A(${wr.size}), .ADDR_WIDTH_B(${rd.size}), .WRITE_DATA_WIDTH_A(${cur.size}), .BYTE_WRITE_WIDTH_A(${cur.size}), .READ_DATA_WIDTH_B(${cur.size}),",
-          s"  .MEMORY_SIZE(${cur.size << wr.size}), .MEMORY_PRIMITIVE(\"$primitive\"), .CLOCKING_MODE(\"common_clock\"),",
-          s"  .READ_LATENCY_B(${RAM.readLatency}), .WRITE_MODE_B(\"$writeMode\"), .SIM_ASSERT_CHK(0)",
-          s") ${getName(cur, 1)} (",
-          s"  .clka(clk), .ena(1'b1), .wea(ram_we), .addra(${getName(wr)}), .dina(${getName(data)}),",
-          s"  .clkb(clk), .enb(1'b1), .regceb(1'b1), .rstb(1'b0), .addrb(${getName(rd)}), .doutb(${getName(cur)}),",
-          "  .sleep(1'b0), .injectsbiterra(1'b0), .injectdbiterra(1'b0), .sbiterrb(), .dbiterrb());")
+          def xpm(name: String, prim: String, mode: String, lo: Int, hi: Int, dout: String) = Seq(
+            "xpm_memory_sdpram #(",
+            s"  .ADDR_WIDTH_A(${wr.size}), .ADDR_WIDTH_B(${rd.size}), .WRITE_DATA_WIDTH_A(${hi - lo}), .BYTE_WRITE_WIDTH_A(${hi - lo}), .READ_DATA_WIDTH_B(${hi - lo}),",
+            s"  .MEMORY_SIZE(${(hi - lo) << wr.size}), .MEMORY_PRIMITIVE(\"$prim\"), .CLOCKING_MODE(\"common_clock\"),",
+            s"  .READ_LATENCY_B(${RAM.readLatency}), .WRITE_MODE_B(\"$mode\"), .SIM_ASSERT_CHK(0)",
+            s") $name (",
+            s"  .clka(clk), .ena(1'b1), .wea(ram_we), .addra(${getName(wr)}), .dina(${getName(data)}[${hi - 1}:$lo]),",
+            s"  .clkb(clk), .enb(1'b1), .regceb(1'b1), .rstb(1'b0), .addrb(${getName(rd)}), .doutb($dout),",
+            "  .sleep(1'b0), .injectsbiterra(1'b0), .injectdbiterra(1'b0), .sbiterrb(), .dbiterrb());")
+          RAM.splitWidth match
+            // A block RAM word wider than a RAMB18's 36 bits (or a RAMB36's 72) takes the next primitive for a few bits: keep the
+            // first splitWidth bits in block RAM and the remainder in distributed RAM at the same addresses (-ramsplit).
+            case Some(w) if primitive == "block" && cur.size > w && (1 << wr.size) >= RAM.blockDepth =>
+              Seq(s"wire [${w - 1}:0] ${getName(cur)}_lo; wire [${cur.size - w - 1}:0] ${getName(cur)}_hi; assign ${getName(cur)} = {${getName(cur)}_hi, ${getName(cur)}_lo};") ++
+                xpm(getName(cur, 1), "block", "no_change", 0, w, s"${getName(cur)}_lo") ++
+                xpm(s"${getName(cur, 1)}_hi", "distributed", "read_first", w, cur.size, s"${getName(cur)}_hi")
+            case _ => xpm(getName(cur, 1), primitive, writeMode, 0, cur.size, getName(cur))
         case cur@BlockROM(values, address, _) =>
           val cfg = BlockRAMConfig(values.size, cur.size).get
           blockMemory(getName(cur), getName(cur, 1), cfg, cur.size, address.size, getName(address), None, Some(values))

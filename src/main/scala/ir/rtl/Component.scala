@@ -129,6 +129,9 @@ object RAM:
 
   /** Minimum depth for a RAM or ROM to be implemented in block memory (shallower ones use distributed memory) */
   var blockDepth: Int = 128
+  /** Width at which a block RAM word is split, the remainder going to distributed RAM (-ramsplit): a word wider than a
+   *  RAMB18's 36 bits would otherwise take a RAMB36 per lane for a few bits. */
+  var splitWidth: Option[Int] = None
 
 /**
  * Read-only memory implemented in a block RAM primitive, with a read latency of RAM.readLatency cycles.
