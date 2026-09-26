@@ -56,7 +56,9 @@ case class DiagE private (override val n: Int, r: Int, s: Int) extends SPL[Compl
     override def implement(inputs: Seq[Sig[Complex[Double]]]): Seq[Sig[Complex[Double]]] = (0 until K).map(p => 
       val twiddles = Vector.tabulate(T)(c => coef((c * K) + p))
       val twiddleHW = hw match // The hardware datatype used for the twiddles is the same as the one used by the data, EXCEPT in case of FixedPoint: to maximize precision, we store as many fractional bits as possible, as twiddles are in the unit circle. 
-        case ComplexHW(FixedPoint(magnitude, fractional)) => ComplexHW(FixedPoint(2, magnitude + fractional - 2))
+        case ComplexHW(FixedPoint(magnitude, fractional, _)) =>
+          val f = DiagE.twiddleFractional.getOrElse(magnitude + fractional - 2)
+          if DiagE.twiddleSaturate then ComplexHW(FixedPoint(1, f, saturating = true)) else ComplexHW(FixedPoint(2, f))
         case _ => hw
       val control = Timer(T)
       val twiddle = ROM(twiddles, control)(using twiddleHW)
@@ -68,6 +70,15 @@ case class DiagE private (override val n: Int, r: Int, s: Int) extends SPL[Compl
 
 /** Companion object of class DiagE */
 object DiagE:
+  /** Fractional bits of fixed-point twiddles, when they should differ from the data's (-twiddle). With 2^k-point
+   *  data words the twiddles otherwise get the same width; a DSP48E2 multiplies 27 x 18 bits, so 18-bit data can
+   *  meet twiddles of up to 27 bits at no multiplier cost (the twiddle ROMs grow). */
+  var twiddleFractional: Option[Int] = None
+  /** Store twiddles with one integer bit (the sign), 1.0 saturated to 1 - 2^-f (-twiddlesat): one more fractional bit in
+   *  the same word, at a relative error of 2^-f on the exact-1.0 entries that are not wired trivially. */
+  var twiddleSaturate: Boolean = false
+
+
   /**
    * Twiddle factors of stage l of a uniform radix-2^r Cooley-Tukey FFT.
    *

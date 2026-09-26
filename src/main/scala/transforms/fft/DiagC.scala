@@ -54,7 +54,7 @@ case class DiagC(override val n: Int, r: Int, l: Int) extends SPL[Complex[Double
     override def implement(inputs: Seq[Sig[Complex[Double]]]): Seq[Sig[Complex[Double]]] = (0 until K).map(p => 
       val twiddles = Vector.tabulate(T)(c => coef((c * K) + p))
       val twiddleHW = hw match
-        case ComplexHW(FixedPoint(magnitude, fractional)) => ComplexHW(FixedPoint(2, magnitude + fractional - 2))
+        case ComplexHW(FixedPoint(magnitude, fractional, _)) => ComplexHW(FixedPoint(2, magnitude + fractional - 2))
         case _ => hw
       val control = Timer(T)
       val twiddle = ROM(twiddles, control)(using twiddleHW)
@@ -85,7 +85,7 @@ case class StreamDiagC(override val n: Int, r: Int) extends SPL[Complex[Double]]
       val j = p % (1 << r)
       val coefs = Vector.tabulate(1 << (this.n - r))(i => DFT.omega(this.n, i * j))
       val twiddleHW = hw match
-        case ComplexHW(FixedPoint(magnitude, fractional)) => ComplexHW(FixedPoint(2, magnitude + fractional - 2))
+        case ComplexHW(FixedPoint(magnitude, fractional, _)) => ComplexHW(FixedPoint(2, magnitude + fractional - 2))
         case _ => hw
       val control1 = Timer(T) :: Const(p >> r)(using Unsigned(this.k - r))
       val control2a = SetCounter(this.n / r)

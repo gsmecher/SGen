@@ -33,7 +33,10 @@ import ir.rtl.signals.{Const, Minus, Operator, Plus, Sig, Times}
  * @param magnitude Number of bits of the integer part
  * @param fractional Number of bits of the fractional part
  */
-case class FixedPoint(magnitude: Int, fractional: Int) extends HW[Double](magnitude + fractional):
+/** Signed fixed-point numbers with `magnitude` integer bits (sign included) and `fractional` fractional bits. With
+ *  `saturating`, constants beyond the range are clamped instead of rejected: meant for twiddles, whose only out-of-range
+ *  value is 1.0 itself (stored as 1 - 2^-fractional; the trivial-multiplier rules still recognise it as one). */
+case class FixedPoint(magnitude: Int, fractional: Int, saturating: Boolean = false) extends HW[Double](magnitude + fractional):
   override def plus(lhs: Sig[Double], rhs: Sig[Double]): Sig[Double] = FixPlus(lhs, rhs)
 
   override def minus(lhs: Sig[Double], rhs: Sig[Double]): Sig[Double] = FixMinus(lhs, rhs)
@@ -58,14 +61,14 @@ case class FixedPoint(magnitude: Int, fractional: Int) extends HW[Double](magnit
       else
         val res = (opposite ^ ((BigInt(1) << size) - 1)) + 1
         if res.bitLength != size then
-          throw IllegalArgumentException(s"Overflow during the conversion of ${const} to a ${this}")
+          if !saturating then throw IllegalArgumentException(s"Overflow during the conversion of ${const} to a ${this}")
           BigInt(1) << (size - 1)
         else
           res
     else
       val res = ((BigInt(1) << fractional).toDouble * BigDecimal(const)).toBigInt
       if res.bitLength >= size then
-        throw IllegalArgumentException(s"Overflow during the conversion of ${const} to a ${this}")
+        if !saturating then throw IllegalArgumentException(s"Overflow during the conversion of ${const} to a ${this}")
         (BigInt(1) << (size - 1)) - 1
       else
         res

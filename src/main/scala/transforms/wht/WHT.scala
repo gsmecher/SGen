@@ -40,7 +40,7 @@ abstract class WHT[T](n: Int, r: Int) extends HighLevelTransform[T](n):
   require(n % r == 0, s"n ($n) must be a multiple of r ($r)")
 
   override def testParams: PartialFunction[HW[T], (Seq[T], Double)] =
-    case hw@FixedPoint(magnitude, fractional) if hw.MID_VALUE*(1<<n) <= hw.MAX_VALUE => (testInputs(hw), (BigInt(1)<<(n+1)).toDouble / (BigInt(1) << fractional).toDouble)
+    case hw@FixedPoint(magnitude, fractional, _) if hw.MID_VALUE*(1<<n) <= hw.MAX_VALUE => (testInputs(hw), (BigInt(1)<<(n+1)).toDouble / (BigInt(1) << fractional).toDouble)
     case hw@Flopoco(wE, wF) if wE <= 11 && wF <= 52 && hw.MID_VALUE * (1 << n) <= hw.MAX_VALUE => (testInputs(hw), (BigInt(1) << (n + 1)).toDouble / (BigInt(1) << wF).toDouble)
     case hw@IEEE754(wE, wF) if wE <= 11 && wF <= 52 && hw.MID_VALUE * (1 << n) <= hw.MAX_VALUE => (testInputs(hw), (BigInt(1) << (n + 1)).toDouble / (BigInt(1) << wF).toDouble)
 

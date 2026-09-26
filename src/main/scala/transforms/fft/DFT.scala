@@ -66,7 +66,7 @@ object DFT:
 
 abstract class DFT(n: Int) extends HighLevelTransform[Complex[Double]](n):
   override def testParams: PartialFunction[HW[Complex[Double]], (Seq[Complex[Double]], Double)] =
-    case ComplexHW(hw@FixedPoint(magnitude, fractional)) if hw.MID_VALUE*(1<<n) <= hw.MAX_VALUE => (testInputs(hw), (BigInt(1)<<(n + 1)).toDouble / (BigInt(1) << fractional).toDouble)
+    case ComplexHW(hw@FixedPoint(magnitude, fractional, _)) if hw.MID_VALUE*(1<<n) <= hw.MAX_VALUE => (testInputs(hw), (BigInt(1)<<(n + 1)).toDouble / (BigInt(1) << fractional).toDouble)
     case ComplexHW(hw@Flopoco(wE, wF)) if wE <= 11 && wF <= 52 && hw.MID_VALUE * (1 << n) <= hw.MAX_VALUE => (testInputs(hw), (BigInt(1) << (n + 1)).toDouble / (BigInt(1) << wF).toDouble)
     case ComplexHW(hw@IEEE754(wE, wF)) if wE <= 11 && wF <= 52 && hw.MID_VALUE * (1 << n) <= hw.MAX_VALUE => (testInputs(hw), (BigInt(1) << (n + 1)).toDouble / (BigInt(1) << wF).toDouble)
 
