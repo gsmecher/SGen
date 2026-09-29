@@ -152,6 +152,7 @@ object Main:
       case "-sf" => scalingFactor = argsQ.dequeue()
       case "-norounding" => FixedPoint.rounding = false
       case "-ramsplit" => ir.rtl.RAM.splitWidth = Some(argsQ.dequeue().toInt)
+      case "-maxfanout" => ir.rtl.Register.maxFanout = Some(argsQ.dequeue().toInt)
       case "-twiddle" => transforms.fft.DiagE.twiddleFractional = Some(argsQ.dequeue().toInt)
       case "-twiddlesat" => transforms.fft.DiagE.twiddleSaturate = true
       case "-alignnext" => StreamingModule.alignNext = true

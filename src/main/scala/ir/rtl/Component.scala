@@ -87,6 +87,13 @@ case class Const(override val size: Int, value: BigInt) extends ImmutableCompone
 case class Register(input: Component, cycles: Int = 1) extends Component(input.size, input):
   require(cycles>0, s"Wrong delay:$cycles")
 
+object Register:
+  /** Estimated loads per bit above which the Verilog backend emits the last stage of a register as several copies, one
+   *  per group of consumers, each marked keep (-maxfanout). The control token chains of a streaming design otherwise
+   *  end in one register per (signal, delay) whose fan-out grows with the number of lanes and the word width: a mux
+   *  select drives one LUT per bit of every mux it steers, a RAM address every RAMD64E of a distributed RAM. */
+  var maxFanout: Option[Int] = None
+
 case class Input(override val size: Int, name: String) extends ImmutableComponent(size):
   override val hashCode = name.hashCode()
 

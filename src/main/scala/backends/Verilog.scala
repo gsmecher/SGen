@@ -57,6 +57,94 @@ object Verilog {
         case Const(size, value) => s"$size'd$value"
         case _ => s"s${indexes(comp) + internal}"
 
+      def width(c: Component) = if c.size != 1 then s"[${c.size - 1}:0] " else ""
+      val resetName = mod.inputs.collectFirst { case Input(_, name) if name == "reset" => name }.getOrElse("1'b0")
+
+      // Fan-out replication (-maxfanout N). The last stage of a register estimated to drive more than N loads per bit
+      // is emitted as several copies, one per group of consumers holding at most N loads, each marked keep so that
+      // neither synthesis nor opt_design merges them back into one driver. Loads are counted through the wire-only
+      // nodes (taps, concatenations, feedback wires) down to the consumers that become cells: a mux select drives one
+      // LUT per bit of the mux, a RAM address every primitive of the RAM, anything else one cell. The write enable
+      // of the RAMs, otherwise one register for all of them, gets a register per RAM instance.
+      val fid = mod.components.zipWithIndex.toMap
+      def transparent(c: Component) = c match
+        case _: Tap | _: Concat | _: Wire => true
+        case _ => false
+      val users: Map[Component, Seq[Component]] = mod.components.flatMap(c => c.parents.map(p => (p, c))).groupMap(_._1)(_._2).withDefaultValue(Seq())
+      def loads(f: Component, x: Component): Int = f match
+        case RAM(_, wr, rd) if x == wr || x == rd =>
+          val depth = 1 << wr.size
+          if depth >= RAM.blockDepth then RAM.splitWidth match
+            case Some(w) if f.size > w => 1 + (f.size - w) * (depth / 64) // one block RAM, plus the distributed remainder of -ramsplit
+            case _ => (f.size + 71) / 72
+          else f.size * math.max(1, depth / 64) // one RAMD64E per bit per 64 words
+        case Mux(address, _) if x == address => f.size
+        case BlockROM(_, address, _) if x == address => 2
+        case _ => 1
+      def finals(start: Component): Seq[(Component, Int)] =
+        val acc = collection.mutable.ArrayBuffer[(Component, Int)]()
+        val seen = collection.mutable.HashSet[Component]()
+        def visit(p: Component): Unit = for c <- users(p) do
+          if transparent(c) then { if seen.add(c) then visit(c) }
+          else acc += ((c, loads(c, p)))
+        visit(start)
+        acc.toSeq
+      // Replicated registers: consumer -> copy index, first fit into copies of at most maxFanout loads (a consumer
+      // heavier than that, such as a wide distributed RAM, gets a copy of its own)
+      val replicated: Map[Component, Map[Component, Int]] = Register.maxFanout match
+        case None => Map()
+        case Some(n) => mod.components.collect { case r: Register =>
+          val fs = finals(r).groupMapReduce(_._1)(_._2)(_ + _).toSeq.sortBy(-_._2)
+          val groups = collection.mutable.ArrayBuffer[Int]()
+          val assignment = fs.map { (f, l) =>
+            val g = groups.indexWhere(_ + l <= n)
+            if g >= 0 then { groups(g) += l; (f, g) } else { groups += l; (f, groups.size - 1) }
+          }
+          if groups.size > 1 then Some((r: Component) -> assignment.toMap) else None
+        }.flatten.toMap
+      def copies(r: Component) = replicated.get(r).map(_.values.max + 1).getOrElse(0)
+      // Wire-only nodes downstream of a replicated register get one copy per consumer, so that each consumer's path
+      // leads to its own register copy
+      val splitMemo = collection.mutable.HashMap[Component, Boolean]()
+      def split(c: Component): Boolean = splitMemo.get(c) match
+        case Some(b) => b
+        case None =>
+          val b = transparent(c) && c.parents.exists(p => replicated.contains(p) || split(p))
+          splitMemo(c) = b
+          b
+      def splitEmitted(c: Component) = split(c) && !c.isInstanceOf[Wire]
+      // Name of parent p as seen from consumer f: its copy for f when f is a consumer that becomes cells, the
+      // original name from a wire-only node (whose own copies are emitted separately, see splitAssignments)
+      def ref(p: Component, f: Component): String = p match
+        case Wire(input) => ref(input, f)
+        case _ if transparent(f) => getName(p)
+        case _ if replicated.contains(p) => replicated(p).get(f).map(g => s"${getName(p)}_r$g").getOrElse(getName(p))
+        case _ if split(p) => s"${getName(p)}_v${fid(f)}"
+        case _ => getName(p)
+      def copySource(r: Register) = r match
+        case Register(input, 1) => ref(input, r)
+        case Register(_, 2) => getName(r, 1)
+        case Register(_, cycles) => s"${getName(r, 1)} [${cycles - 2}]"
+      def copyUpdates(r: Register) = (0 until copies(r)).map(g => s"${getName(r)}_r$g <= ${copySource(r)};")
+      def ramInstances(cur: RAM): Seq[String] = RAM.splitWidth match
+        case Some(w) if cur.size > w && (1 << cur.wr.size) >= RAM.blockDepth => Seq(getName(cur, 1), s"${getName(cur, 1)}_hi")
+        case _ => Seq(getName(cur, 1))
+      def weName(inst: String) = if Register.maxFanout.isDefined then s"we_$inst" else "ram_we"
+      val copyDeclarations = mod.components.flatMap {
+        case cur: Register if replicated.contains(cur) => (0 until copies(cur)).map(g => s"(* keep = \"true\" *) reg ${width(cur)}${getName(cur)}_r$g;")
+        case cur if splitEmitted(cur) => finals(cur).map(_._1).distinct.map(f => s"wire ${width(cur)}${getName(cur)}_v${fid(f)};")
+        case cur: RAM if Register.maxFanout.isDefined => ramInstances(cur).map(i => s"(* keep = \"true\" *) reg ${weName(i)} = 1'b0; // write enable of this RAM (see below)")
+        case _ => Seq()
+      }
+      val copyInitial = mod.components.collect { case r: Register if replicated.contains(r) => (0 until copies(r)).map(g => s"${getName(r)}_r$g = 0;") }.flatten
+      val splitAssignments = mod.components.filter(splitEmitted).flatMap(t => finals(t).map(_._1).distinct.map { f =>
+        val rhs = t match
+          case Tap(input, range) => s"${ref(input, f)}[${if (range.size > 1) s"${range.last}:" else ""}${range.start}]"
+          case Concat(inputs) => inputs.map(ref(_, f)).mkString("{", ", ", "}")
+          case _ => throw Exception(s"Unexpected wire-only node $t")
+        s"  assign ${getName(t)}_v${fid(f)} = $rhs;\n"
+      })
+      val weUpdates = if Register.maxFanout.isDefined then mod.components.collect { case cur: RAM => ramInstances(cur).map(i => s"${weName(i)} <= ~$resetName;") }.flatten else Seq(s"ram_we <= ~$resetName;")
 
       val declarations = (mod.components.flatMap {
         case _: Output | _: Input | _: Const | _: Wire => Seq()
@@ -71,54 +159,52 @@ object Verilog {
         case cur: RAM => Seq(s"wire ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
         case cur: BlockROM => Seq(s"wire ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
         case cur => Seq(s"wire ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
-      }:+"integer i;":+"reg ram_we = 1'b0; // write enable of the RAMs (see below)").map(s => s"  $s\n").mkString("")
+      } ++ copyDeclarations :+ "integer i;" :+ (if Register.maxFanout.isDefined then "// write enables of the RAMs: one register per instance (see above)" else "reg ram_we = 1'b0; // write enable of the RAMs (see below)")).map(s => s"  $s\n").mkString("")
 
       // Power-up values of the registers (zero, as on an FPGA), so that a simulation starts in the state the hardware starts in: reset
       // does not clear the control token chains, which would otherwise stay undefined for as long as the latency of the design. Written
       // as an initial block after the combinational blocks rather than as declaration initialisers, so that the first evaluation of
       // the always @(*) blocks sees them (they only run on an event, and a declaration initialiser is not one).
-      val initial = mod.components.flatMap {
+      val initial = (mod.components.flatMap {
         case cur@Register(_, cycles) if cycles == 1 => Seq(s"${getName(cur)} = 0;")
         case cur@Register(_, cycles) if cycles == 2 => Seq(s"${getName(cur, 1)} = 0;", s"${getName(cur)} = 0;")
         case cur@Register(_, cycles) => Seq(s"for (i = 0; i < $cycles; i = i + 1) ${getName(cur, 1)}[i] = 0;")
         case _ => Seq()
-      }.map(s => s"      $s\n").mkString("")
-      val resetName = mod.inputs.collectFirst { case Input(_, name) if name == "reset" => name }.getOrElse("1'b0")
-
-      val assignments = mod.components.flatMap(cur => (cur match
-        case Output(input, _) => Some(getName(input))
-        case Plus(terms) => Some(terms.map(getName(_)).mkString(" + "))
-        case Minus(lhs, rhs) => Some(s"${getName(lhs)} - ${getName(rhs)}")
-        case Times(lhs, rhs) => Some(s"$$signed(${getName(lhs)}) * $$signed(${getName(rhs)})")
-        case And(terms) => Some(terms.map(getName(_)).mkString(" & "))
-        case Xor(inputs) => Some(inputs.map(getName(_)).mkString(" ^ "))
-        case Or(inputs) => Some(inputs.map(getName(_)).mkString(" | "))
-        case Equals(lhs, rhs) => Some(s"${getName(lhs)} == ${getName(rhs)}")
-        case Not(input) => Some(s"~${getName(input)}")
-        case Concat(inputs) => Some(inputs.map(getName(_)).mkString("{",", ","}"))
-        case Tap(input, range) => Some(s"${getName(input)}[${if (range.size > 1) s"${range.last}:" else ""}${range.start}]")
+      } ++ copyInitial).map(s => s"      $s\n").mkString("")
+      val assignments = (mod.components.flatMap(cur => (cur match
+        case Output(input, _) => Some(ref(input, cur))
+        case Plus(terms) => Some(terms.map(ref(_, cur)).mkString(" + "))
+        case Minus(lhs, rhs) => Some(s"${ref(lhs, cur)} - ${ref(rhs, cur)}")
+        case Times(lhs, rhs) => Some(s"$$signed(${ref(lhs, cur)}) * $$signed(${ref(rhs, cur)})")
+        case And(terms) => Some(terms.map(ref(_, cur)).mkString(" & "))
+        case Xor(inputs) => Some(inputs.map(ref(_, cur)).mkString(" ^ "))
+        case Or(inputs) => Some(inputs.map(ref(_, cur)).mkString(" | "))
+        case Equals(lhs, rhs) => Some(s"${ref(lhs, cur)} == ${ref(rhs, cur)}")
+        case Not(input) => Some(s"~${ref(input, cur)}")
+        case Concat(inputs) => Some(inputs.map(ref(_, cur)).mkString("{",", ","}"))
+        case Tap(input, range) => Some(s"${ref(input, cur)}[${if (range.size > 1) s"${range.last}:" else ""}${range.start}]")
         case Register(input, cycles) if cycles > 2 => Some(s"${getName(cur,1)} [${cycles - 1}]")
-        case Mux(address, inputs) if address.size == 1 => Some(s"${getName(address)} ? ${getName(inputs.last)} : ${getName(inputs.head)}")
+        case Mux(address, inputs) if address.size == 1 => Some(s"${ref(address, cur)} ? ${ref(inputs.last, cur)} : ${ref(inputs.head, cur)}")
         case _ => None
-      ).map((cur, _))).map((cur, rhs) => s"  assign ${getName(cur)} = $rhs;\n").mkString("")
+      ).map((cur, _))).map((cur, rhs) => s"  assign ${getName(cur)} = $rhs;\n") ++ splitAssignments).mkString("")
 
-      val sequential = (s"ram_we <= ~$resetName;" +: mod.components.flatMap {
-        case cur@Register(input, cycles) if cycles == 1 => Seq(s"${getName(cur)} <= ${getName(input)};")
+      val sequential = (weUpdates ++ mod.components.flatMap {
+        case cur@Register(input, cycles) if cycles == 1 => s"${getName(cur)} <= ${ref(input, cur)};" +: copyUpdates(cur)
         case cur@Register(input, cycles) if cycles == 2 => Seq(
-          s"${getName(cur, 1)} <= ${getName(input)};",
-          s"${getName(cur)} <= ${getName(cur, 1)};")
+          s"${getName(cur, 1)} <= ${ref(input, cur)};",
+          s"${getName(cur)} <= ${getName(cur, 1)};") ++ copyUpdates(cur)
         case cur@Register(input, cycles) => Seq(
-          s"${getName(cur, 1)} [0] <= ${getName(input)};",
+          s"${getName(cur, 1)} [0] <= ${ref(input, cur)};",
           s"for (i = 1; i < $cycles; i = i + 1)",
-          s"  ${getName(cur, 1)} [i] <= ${getName(cur, 1)} [i - 1];")
+          s"  ${getName(cur, 1)} [i] <= ${getName(cur, 1)} [i - 1];") ++ copyUpdates(cur)
         case _ => Seq()
       }).map(s => s"      $s\n").mkString("")
 
       val combinatorial = mod.components.flatMap {
         case cur@Mux(address, inputs) if address.size > 1 =>
           "always @(*)" +:
-            s"  case(${getName(address)})" +:
-            inputs.zipWithIndex.map((in, i) => s"    ${if (i == inputs.size - 1 && ((1 << address.size) != inputs.size)) "default" else i}: ${getName(cur)} = ${getName(in)};") :+
+            s"  case(${ref(address, cur)})" +:
+            inputs.zipWithIndex.map((in, i) => s"    ${if (i == inputs.size - 1 && ((1 << address.size) != inputs.size)) "default" else i}: ${getName(cur)} = ${ref(in, cur)};") :+
             "  endcase"
         case cur@RAM(data, wr, rd) =>
           // Block RAMs use NO_CHANGE mode, which supports a higher clock frequency than READ_FIRST on UltraScale devices, but requires that
@@ -132,8 +218,8 @@ object Verilog {
             s"  .MEMORY_SIZE(${(hi - lo) << wr.size}), .MEMORY_PRIMITIVE(\"$prim\"), .CLOCKING_MODE(\"common_clock\"),",
             s"  .READ_LATENCY_B(${RAM.readLatency}), .WRITE_MODE_B(\"$mode\"), .SIM_ASSERT_CHK(0)",
             s") $name (",
-            s"  .clka(clk), .ena(1'b1), .wea(ram_we), .addra(${getName(wr)}), .dina(${getName(data)}[${hi - 1}:$lo]),",
-            s"  .clkb(clk), .enb(1'b1), .regceb(1'b1), .rstb(1'b0), .addrb(${getName(rd)}), .doutb($dout),",
+            s"  .clka(clk), .ena(1'b1), .wea(${weName(name)}), .addra(${ref(wr, cur)}), .dina(${ref(data, cur)}[${hi - 1}:$lo]),",
+            s"  .clkb(clk), .enb(1'b1), .regceb(1'b1), .rstb(1'b0), .addrb(${ref(rd, cur)}), .doutb($dout),",
             "  .sleep(1'b0), .injectsbiterra(1'b0), .injectdbiterra(1'b0), .sbiterrb(), .dbiterrb());")
           RAM.splitWidth match
             // A block RAM word wider than a RAMB18's 36 bits (or a RAMB36's 72) takes the next primitive for a few bits: keep the
@@ -145,10 +231,10 @@ object Verilog {
             case _ => xpm(getName(cur, 1), primitive, writeMode, 0, cur.size, getName(cur))
         case cur@BlockROM(values, address, _) =>
           val cfg = BlockRAMConfig(values.size, cur.size).get
-          blockMemory(getName(cur), getName(cur, 1), cfg, cur.size, address.size, getName(address), None, Some(values))
+          blockMemory(getName(cur), getName(cur, 1), cfg, cur.size, address.size, ref(address, cur), None, Some(values))
         case cur: Extern =>
           mod.dependencies.add(cur.filename)
-          Seq(s"${cur.module} ext_${getName(cur)}(${cur.inputs.map { case (name, comp) => s".$name(${getName(comp)}), " }.mkString}.${cur.outputName}(${getName(cur)}));")
+          Seq(s"${cur.module} ext_${getName(cur)}(${cur.inputs.map { case (name, comp) => s".$name(${ref(comp, cur)}), " }.mkString}.${cur.outputName}(${getName(cur)}));")
         case _ => Seq()
       }.map(s => s"  $s\n").mkString("")
 
