@@ -159,6 +159,7 @@ object Main:
       case "-index" => StreamingModule.indexOutputs = true
       case "-inorder" => inputOrder = argsQ.dequeue().toLowerCase
       case "-outorder" => outputOrder = argsQ.dequeue().toLowerCase
+      case "-module" => backends.Verilog.moduleName = argsQ.dequeue()
       case "-bramthreshold" => ir.rtl.RAM.blockDepth = Numeric[Int].parseString(argsQ.dequeue()).getOrElse(throw new IllegalArgumentException("Parameter bramthreshold should be an integer."))
       case "-testbench" => testbench = true
       case "-dualramcontrol" => dualRAMControl = true

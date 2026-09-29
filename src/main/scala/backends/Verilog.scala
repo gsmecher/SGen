@@ -35,6 +35,10 @@ import scala.annotation.tailrec
  * Adds a Verilog backend to modules.
  */
 object Verilog {
+  /** Name of the generated module (-module). Was always "main", which the users of a design renamed by hand: a design
+   *  regenerated from the command line recorded in its header then came out under the wrong name. */
+  var moduleName: String = "main"
+
   extension (mod:Module)
     /**
      * @return a string containing the verilog code of the module
@@ -269,7 +273,7 @@ object Verilog {
 
       val result = new StringBuilder
       result ++= "`timescale 1ns/1ps // the design is clock-period agnostic; a directive lets it elaborate alongside modules that have one (XPM, unisim)\n"
-      result ++= s"module main(input clk,\n"
+      result ++= s"module ${Verilog.moduleName}(input clk,\n"
       result ++= mod.inputs.map(s => s"  input ${if (s.size != 1) s"[${s.size - 1}:0] " else ""}${getName(s)},\n").mkString("")
       result ++= mod.outputs.map(s => s"  output ${if (s.size != 1) s"[${s.size - 1}:0] " else ""}${getName(s)}").mkString(",\n")
       result ++= ");\n\n"
@@ -426,7 +430,7 @@ object Verilog {
       res ++= "        $display(\"Success.\");\n"
       res ++= "        $finish();\n"
       res ++= "      end\n"
-      res ++= "      main uut(clk,rst,next," ++= (0 until sm.K).map(i => sm.dataInputs(i).name).mkString(",") ++= ",next_out," ++= (0 until sm.K).map(i => sm.dataOutputs(i).name).mkString(",") ++= ");\n"
+      res ++= s"      ${Verilog.moduleName} uut(clk,rst,next," ++= (0 until sm.K).map(i => sm.dataInputs(i).name).mkString(",") ++= ",next_out," ++= (0 until sm.K).map(i => sm.dataOutputs(i).name).mkString(",") ++= ");\n"
       res ++= "endmodule\n"
       res.toString
     }

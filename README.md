@@ -63,6 +63,7 @@ sgen.bat [options] <transform‑name> [lp matrices...]
 | `-index` | – | Adds the outputs `index_out` (index of the current output within its dataset, in cycles) and `valid_out` (whether the outputs are part of a dataset). |
 | `-norounding` | – | Truncate the results of scaled butterflies and of products instead of rounding them to nearest. |
 | `-o`   | `<file>` | Output file name.                                                                                                                                                        |
+| `-module` | `<name>` | Name of the generated Verilog module (default `main`). |
 | `-benchmark` | – | Adds a benchmark module in the generated design.                                                                                                                         |
 | `-rtlgraph`  | – | Emits a [DOT](https://en.wikipedia.org/wiki/DOT_(graph_description_language)) graph of the generated RTL.                                                                |
 | `-dualramcontrol` | – | Uses independent read/write addresses (uses more resources, but offers more flexibile timing constraints). Implicitly enabled for `*compact` designs.                    |
