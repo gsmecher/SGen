@@ -67,8 +67,8 @@ object DOT:
 
       val nodes = mod.components.flatMap {
         case _: Output | _: Input | _: Wire | _: Const => None
-        case cur@Register(_, cycles) if cycles == 1 => node(cur, """label="Reg",shape=square""")
-        case cur@Register(_, cycles) => node(cur, s"""label="FIFO($cycles cycles)",shape=record""")
+        case cur@Register(_, cycles, _) if cycles == 1 => node(cur, """label="Reg",shape=square""")
+        case cur@Register(_, cycles, _) => node(cur, s"""label="FIFO($cycles cycles)",shape=record""")
         case cur@Plus(_) => node(cur, """label="+",shape=circle""")
         case cur@Times(_, _) => node(cur, """label="*",shape=circle""")
         case cur@Or(_) => node(cur, """label="|",shape=circle""")

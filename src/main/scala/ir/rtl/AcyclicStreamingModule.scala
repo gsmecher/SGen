@@ -100,7 +100,10 @@ abstract class AcyclicStreamingModule[T: HW](t: Int, k: Int) extends StreamingMo
             val originalComponent = sig match
               case Input(i) => inputs(i)
               case _ => sig.implement(implementComp(times.head + sig.pipeline))
-            immutable.HashMap.from(times.scanLeft(times.head + sig.pipeline -> originalComponent)((prev, time) => time -> prev._2.delay(prev._1 - time)))
+            immutable.HashMap.from(times.scanLeft(times.head + sig.pipeline -> originalComponent)((prev, time) =>
+              val d = prev._1 - time
+              // the first pipeline register of a node that asks for it stays in the fabric
+              time -> (if d > 0 && sig.keepFirst && prev._2 == originalComponent then prev._2.keepRegister.delay(d - 1) else prev._2.delay(d))))
           })(requestedTime)
           
     synch.toSeq.sortBy(- _._2.head).foreach((sig, times) => implementComp(times.head)(sig,0))  

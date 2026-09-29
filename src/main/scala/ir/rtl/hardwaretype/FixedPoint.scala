@@ -85,20 +85,31 @@ case class FixedPoint(magnitude: Int, fractional: Int, saturating: Boolean = fal
 
   override def description: String = if fractional == 0 then s"$magnitude-bits signed integer in two's complement format" else s"signed fixed-point number ($magnitude. $fractional bits representation)"
 
+  // The adders' result registers stay in the fabric (Sig.keepFirst): a sum feeding a DSP block would otherwise be
+  // absorbed, register and all, so that its carry chain and the route into the block share a cycle (three CARRY8 leave
+  // 0.7 ns of a 1.6 ns cycle for the route on an UltraScale+ device; every adder was a failing class in a four-module
+  // design). The block gets its own input register from the product (see FixTimes and FixMultAddSub).
   private case class FixPlus(override val lhs: Sig[Double], override val rhs: Sig[Double]) extends Plus(lhs, rhs):
     override def pipeline = 1
+    override def keepFirst = true
 
     override def implement(implicit cp: Sig[?] => Component) = ir.rtl.Plus(Seq(cp(this.lhs), cp(this.rhs)))
 
   private case class FixMinus(override val lhs: Sig[Double], override val rhs: Sig[Double]) extends Minus(lhs, rhs):
     override def pipeline = 1
+    override def keepFirst = true
 
     override def implement(implicit cp: Sig[?] => Component) = ir.rtl.Minus(cp(this.lhs), cp(this.rhs))
 
   private case class FixTimes(override val lhs: Sig[Double], override val rhs: Sig[Double]) extends Times(lhs, rhs):
-    override def pipeline = this.rhs match
-      case Const(value) if value > 0 && this.rhs.hw.bitsOf(value).bitCount == 1 => 0
-      case _ => 3
+    def trivial = this.rhs match
+      case Const(value) if value > 0 && this.rhs.hw.bitsOf(value).bitCount == 1 => true
+      case _ => false
+    // A product's operands are registered here, as in FixMultAddSub: the block's input registers, which the synthesizer
+    // does not always create by moving one of the registers placed after the product (it then multiplies straight
+    // from the fabric, adder and all). Three registers as before: input, multiplier, output.
+    override def pipeline = if trivial then 0 else 2
+    override def latency = if trivial then 0 else 1
 
     override def implement(implicit cp: Sig[?] => Component): Component =
       this.rhs match
@@ -116,7 +127,10 @@ case class FixedPoint(magnitude: Int, fractional: Int, saturating: Boolean = fal
             )
         case _ =>
           val shift = this.rhs.hw.asInstanceOf[FixedPoint].fractional
-          ir.rtl.Tap(ir.rtl.Times(cp(this.lhs), cp(this.rhs)), shift until (shift + this.lhs.hw.size))
+          val w = this.rhs match
+            case c: Const[?] => ir.rtl.Const(this.rhs.hw.size, c.bits)
+            case _ => cp(this.rhs).register
+          ir.rtl.Tap(ir.rtl.Times(cp(this.lhs).register, w), shift until (shift + this.lhs.hw.size))
 
   /**
    * Sum or difference of two signals, shifted right by `shift` bits (a scaled butterfly). The sum is computed on `shift` more bits
@@ -132,6 +146,7 @@ case class FixedPoint(magnitude: Int, fractional: Int, saturating: Boolean = fal
     override val hash: Int = Seq("FixAddShift", lhs, rhs, subtract, shift).hashCode()
 
     override def pipeline = 1
+    override def keepFirst = true
 
     private def convergent = FixedPoint.rounding && shift == 1
 

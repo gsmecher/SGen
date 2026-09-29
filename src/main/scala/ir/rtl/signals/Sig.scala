@@ -44,6 +44,10 @@ abstract class Sig[T: HW]:
   def parents: Seq[(Sig[?], Int)]
   /** Number of registers that should be put after this signal.*/
   def pipeline = 0
+  /** Whether the first of those registers must stay in the fabric (keep): for a node the synthesizer would otherwise
+   *  absorb, register and all, into the DSP block or RAM it feeds -- an adder or a mux in front of a multiplier -- so
+   *  that the node's logic and the route into the block no longer share a cycle. */
+  def keepFirst = false
   /** Implementation of this signal (using RTL components)*/
   def implement(cp: (Sig[?], Int) => Component): Component
   /** Adds two signals*/

@@ -47,7 +47,7 @@ object Verilog {
       // Get IDs for each regular RTL nodes. An RTL node may use several ids.
       val indexes = HashMap.from(mod.components.zip(mod.components.map {
         case _: Input | _: Output | _: Wire | _: Const => 0
-        case Register(_, cycles) if cycles > 1 => 2
+        case Register(_, cycles, _) if cycles > 1 => 2
         case _: RAM | _: BlockROM => 2
         case _ => 1
       }.scanLeft(1)(_ + _)))
@@ -162,9 +162,9 @@ object Verilog {
         case _ => getName(p)
       def ref(p: Component, f: Component): String = refp(p, (f, 0))
       def copySource(r: Register) = r match
-        case Register(input, 1) => ref(input, r)
-        case Register(_, 2) => getName(r, 1)
-        case Register(_, cycles) => s"${getName(r, 1)} [${cycles - 2}]"
+        case Register(input, 1, _) => ref(input, r)
+        case Register(_, 2, _) => getName(r, 1)
+        case Register(_, cycles, _) => s"${getName(r, 1)} [${cycles - 2}]"
       def copyUpdates(r: Register) = (0 until copies(r)).map(g => s"${getName(r)}_r$g <= ${copySource(r)};")
       def weName(inst: String) = if Register.maxFanout.isDefined then s"we_$inst" else "ram_we"
       val copyDeclarations = mod.components.flatMap {
@@ -186,11 +186,11 @@ object Verilog {
       val declarations = (mod.components.flatMap {
         case _: Output | _: Input | _: Const | _: Wire => Seq()
         case cur@Mux(address, inputs) if address.size > 1 => Seq(s"reg ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
-        case cur@Register(_, cycles) if cycles == 1 => Seq(s"reg ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
-        case cur@Register(_, cycles) if cycles == 2 => Seq(
+        case cur@Register(_, cycles, keep) if cycles == 1 => Seq(s"${if keep then "(* keep = \"true\" *) " else ""}reg ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
+        case cur@Register(_, cycles, _) if cycles == 2 => Seq(
           s"reg ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur, 1)};",
           s"reg ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
-        case cur@Register(_, cycles) => Seq(
+        case cur@Register(_, cycles, _) => Seq(
           s"reg ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur, 1)} [${cycles - 1}:0];",
           s"wire ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
         case cur: RAM => Seq(s"wire ${if (cur.size != 1) s"[${cur.size - 1}:0] " else ""}${getName(cur)};")
@@ -203,9 +203,9 @@ object Verilog {
       // as an initial block after the combinational blocks rather than as declaration initialisers, so that the first evaluation of
       // the always @(*) blocks sees them (they only run on an event, and a declaration initialiser is not one).
       val initial = (mod.components.flatMap {
-        case cur@Register(_, cycles) if cycles == 1 => Seq(s"${getName(cur)} = 0;")
-        case cur@Register(_, cycles) if cycles == 2 => Seq(s"${getName(cur, 1)} = 0;", s"${getName(cur)} = 0;")
-        case cur@Register(_, cycles) => Seq(s"for (i = 0; i < $cycles; i = i + 1) ${getName(cur, 1)}[i] = 0;")
+        case cur@Register(_, cycles, _) if cycles == 1 => Seq(s"${getName(cur)} = 0;")
+        case cur@Register(_, cycles, _) if cycles == 2 => Seq(s"${getName(cur, 1)} = 0;", s"${getName(cur)} = 0;")
+        case cur@Register(_, cycles, _) => Seq(s"for (i = 0; i < $cycles; i = i + 1) ${getName(cur, 1)}[i] = 0;")
         case _ => Seq()
       } ++ copyInitial).map(s => s"      $s\n").mkString("")
       val assignments = (mod.components.flatMap(cur => (cur match
@@ -220,17 +220,17 @@ object Verilog {
         case Not(input) => Some(s"~${ref(input, cur)}")
         case Concat(inputs) => Some(inputs.map(ref(_, cur)).mkString("{",", ","}"))
         case Tap(input, range) => Some(s"${ref(input, cur)}[${if (range.size > 1) s"${range.last}:" else ""}${range.start}]")
-        case Register(input, cycles) if cycles > 2 => Some(s"${getName(cur,1)} [${cycles - 1}]")
+        case Register(input, cycles, _) if cycles > 2 => Some(s"${getName(cur,1)} [${cycles - 1}]")
         case Mux(address, inputs) if address.size == 1 => Some(s"${ref(address, cur)} ? ${ref(inputs.last, cur)} : ${ref(inputs.head, cur)}")
         case _ => None
       ).map((cur, _))).map((cur, rhs) => s"  assign ${getName(cur)} = $rhs;\n") ++ splitAssignments).mkString("")
 
       val sequential = (weUpdates ++ mod.components.flatMap {
-        case cur@Register(input, cycles) if cycles == 1 => s"${getName(cur)} <= ${ref(input, cur)};" +: copyUpdates(cur)
-        case cur@Register(input, cycles) if cycles == 2 => Seq(
+        case cur@Register(input, cycles, _) if cycles == 1 => s"${getName(cur)} <= ${ref(input, cur)};" +: copyUpdates(cur)
+        case cur@Register(input, cycles, _) if cycles == 2 => Seq(
           s"${getName(cur, 1)} <= ${ref(input, cur)};",
           s"${getName(cur)} <= ${getName(cur, 1)};") ++ copyUpdates(cur)
-        case cur@Register(input, cycles) => Seq(
+        case cur@Register(input, cycles, _) => Seq(
           s"${getName(cur, 1)} [0] <= ${ref(input, cur)};",
           s"for (i = 1; i < $cycles; i = i + 1)",
           s"  ${getName(cur, 1)} [i] <= ${getName(cur, 1)} [i - 1];") ++ copyUpdates(cur)

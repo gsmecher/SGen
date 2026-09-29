@@ -42,6 +42,9 @@ case class Mux[U] private(address: Sig[Int], inputs: Seq[Sig[U]]) extends Operat
     else ir.rtl.Mux(cp(address), inputs.map(cp))
 
   override val pipeline = 1
+  // A mux in front of a DSP block would be absorbed with its register as the block's input register (the switch between
+  // butterfly outputs and the twiddle multiplier); a ROM is one already.
+  override def keepFirst = !isRom
 
 /** Companion object of the class Mux */
 object Mux:

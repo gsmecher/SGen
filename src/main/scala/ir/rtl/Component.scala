@@ -39,6 +39,10 @@ abstract sealed class Component(val size: Int, _parents: Component*):
    */
   final def register = Register(this)
 
+  /** A register the synthesizer must leave in the fabric where it is (keep): not absorbed into a DSP block or a RAM
+   *  as one of their registers, not merged with an equivalent one, not moved. Cuts a route in two. */
+  final def keepRegister = Register(this, 1, keep = true)
+
   final def delay(cycles:Int) =
     require(cycles>=0)
     if cycles == 0 then
@@ -84,8 +88,9 @@ object Wire :
 case class Const(override val size: Int, value: BigInt) extends ImmutableComponent(size):
   override val hashCode = value.hashCode()
 
-case class Register(input: Component, cycles: Int = 1) extends Component(input.size, input):
+case class Register(input: Component, cycles: Int = 1, keep: Boolean = false) extends Component(input.size, input):
   require(cycles>0, s"Wrong delay:$cycles")
+  require(!keep || cycles == 1, "keep applies to a single register")
 
 object Register:
   /** Estimated loads per bit above which the Verilog backend emits the last stage of a register as several copies, one
