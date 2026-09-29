@@ -112,7 +112,10 @@ object Verilog {
         case _ => false
       val users: Map[Component, Seq[Component]] = mod.components.flatMap(c => c.parents.map(p => (p, c))).groupMap(_._1)(_._2).withDefaultValue(Seq())
       def loads(f: Component, x: Component): Int = f match
-        case Mux(address, _) if x == address => f.size
+        // Two loads per bit: measured on the routed N=4096 SSR-8 cores (a 44-bit 2:1 mux put 86 loads on its select
+        // copy). With the 48-load groups this also gives every data switch a copy of its own, which places better than
+        // a copy shared between two switches: the copy has one datapath to sit next to.
+        case Mux(address, _) if x == address => 2 * f.size
         case BlockROM(_, address, _) if x == address => 2
         case _ => 1
       def finals(start: Component): Seq[(Consumer, Int)] =
