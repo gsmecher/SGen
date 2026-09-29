@@ -66,32 +66,67 @@ object Verilog {
       // nodes (taps, concatenations, feedback wires) down to the consumers that become cells: a mux select drives one
       // LUT per bit of the mux, a RAM address every primitive of the RAM, anything else one cell. The write enable
       // of the RAMs, otherwise one register for all of them, gets a register per RAM instance.
+      //
+      // A RAM node is emitted as one or more xpm instances ("pieces"): its block part, and its distributed part (the
+      // remainder of -ramsplit, or the whole of a shallow RAM) in slices narrow enough that a slice's address fan-out
+      // (one RAMD64E per bit per 64 words, plus the F7/F8 read muxes and the write decode of a deeper RAM) fits N.
+      // Each piece's write and read address ports are consumers of their own, so that a deep distributed remainder,
+      // or a register addressing both ports of one RAM, does not keep hundreds of loads on one address copy. A
+      // consumer is therefore (node, port), the port being 0 for anything but a RAM address and 2 * piece + 1 (write)
+      // or 2 * piece + 2 (read) for those.
+      type Consumer = (Component, Int)
+      case class Piece(index: Int, lo: Int, hi: Int, block: Boolean, name: String, dout: String)
+      def pieces(cur: RAM): Seq[Piece] =
+        val depth = 1 << cur.wr.size
+        val base = getName(cur, 1)
+        val out = getName(cur)
+        val blockPart: Option[(Int, Int)] =
+          if depth < RAM.blockDepth then None
+          else RAM.splitWidth match
+            case Some(w) if cur.size > w => Some((0, w))
+            case _ => Some((0, cur.size))
+        val distLo = blockPart.map(_._2).getOrElse(0)
+        val distWidth = cur.size - distLo
+        val sliceBits = Register.maxFanout.map(n => math.max(1, n / distLoadsPerBit(depth))).getOrElse(math.max(1, distWidth))
+        val nSlices = if distWidth == 0 then 0 else (distWidth + sliceBits - 1) / sliceBits
+        val block = blockPart.map((lo, hi) => Piece(0, lo, hi, true, base, if nSlices == 0 then out else s"${out}_lo")).toSeq
+        val dist = (0 until nSlices).map { k =>
+          val lo = distLo + k * sliceBits
+          val hi = math.min(cur.size, lo + sliceBits)
+          val suffix = if blockPart.isDefined then (if nSlices == 1 then "_hi" else s"_hi$k") else (if nSlices == 1 then "" else s"_s$k")
+          Piece(block.size + k, lo, hi, false, s"$base$suffix", if suffix.isEmpty then out else s"$out$suffix")
+        }
+        block ++ dist
+      def distLoadsPerBit(depth: Int) = math.max(1, depth / 64 + depth / 128 + depth / 256)
+      def pieceLoads(cur: RAM, pc: Piece): Int =
+        if pc.block then math.max(1, (pc.hi - pc.lo + 71) / 72) else (pc.hi - pc.lo) * distLoadsPerBit(1 << cur.wr.size)
+      def ramInstances(cur: RAM): Seq[String] = pieces(cur).map(_.name)
       val fid = mod.components.zipWithIndex.toMap
+      def cid(f: Consumer) = if f._2 == 0 then s"${fid(f._1)}" else s"${fid(f._1)}p${f._2}"
       def transparent(c: Component) = c match
         case _: Tap | _: Concat | _: Wire => true
         case _ => false
       val users: Map[Component, Seq[Component]] = mod.components.flatMap(c => c.parents.map(p => (p, c))).groupMap(_._1)(_._2).withDefaultValue(Seq())
       def loads(f: Component, x: Component): Int = f match
-        case RAM(_, wr, rd) if x == wr || x == rd =>
-          val depth = 1 << wr.size
-          if depth >= RAM.blockDepth then RAM.splitWidth match
-            case Some(w) if f.size > w => 1 + (f.size - w) * (depth / 64) // one block RAM, plus the distributed remainder of -ramsplit
-            case _ => (f.size + 71) / 72
-          else f.size * math.max(1, depth / 64) // one RAMD64E per bit per 64 words
         case Mux(address, _) if x == address => f.size
         case BlockROM(_, address, _) if x == address => 2
         case _ => 1
-      def finals(start: Component): Seq[(Component, Int)] =
-        val acc = collection.mutable.ArrayBuffer[(Component, Int)]()
+      def finals(start: Component): Seq[(Consumer, Int)] =
+        val acc = collection.mutable.ArrayBuffer[(Consumer, Int)]()
         val seen = collection.mutable.HashSet[Component]()
         def visit(p: Component): Unit = for c <- users(p) do
           if transparent(c) then { if seen.add(c) then visit(c) }
-          else acc += ((c, loads(c, p)))
+          else c match
+            case r: RAM if p == r.wr || p == r.rd =>
+              for pc <- pieces(r) do
+                if p == r.wr then acc += (((c, 2 * pc.index + 1), pieceLoads(r, pc)))
+                if p == r.rd then acc += (((c, 2 * pc.index + 2), pieceLoads(r, pc)))
+            case _ => acc += (((c, 0), loads(c, p)))
         visit(start)
         acc.toSeq
       // Replicated registers: consumer -> copy index, first fit into copies of at most maxFanout loads (a consumer
-      // heavier than that, such as a wide distributed RAM, gets a copy of its own)
-      val replicated: Map[Component, Map[Component, Int]] = Register.maxFanout match
+      // heavier than that gets a copy of its own)
+      val replicated: Map[Component, Map[Consumer, Int]] = Register.maxFanout match
         case None => Map()
         case Some(n) => mod.components.collect { case r: Register =>
           val fs = finals(r).groupMapReduce(_._1)(_._2)(_ + _).toSeq.sortBy(-_._2)
@@ -115,34 +150,32 @@ object Verilog {
       def splitEmitted(c: Component) = split(c) && !c.isInstanceOf[Wire]
       // Name of parent p as seen from consumer f: its copy for f when f is a consumer that becomes cells, the
       // original name from a wire-only node (whose own copies are emitted separately, see splitAssignments)
-      def ref(p: Component, f: Component): String = p match
-        case Wire(input) => ref(input, f)
-        case _ if transparent(f) => getName(p)
+      def refp(p: Component, f: Consumer): String = p match
+        case Wire(input) => refp(input, f)
+        case _ if transparent(f._1) => getName(p)
         case _ if replicated.contains(p) => replicated(p).get(f).map(g => s"${getName(p)}_r$g").getOrElse(getName(p))
-        case _ if split(p) => s"${getName(p)}_v${fid(f)}"
+        case _ if split(p) => s"${getName(p)}_v${cid(f)}"
         case _ => getName(p)
+      def ref(p: Component, f: Component): String = refp(p, (f, 0))
       def copySource(r: Register) = r match
         case Register(input, 1) => ref(input, r)
         case Register(_, 2) => getName(r, 1)
         case Register(_, cycles) => s"${getName(r, 1)} [${cycles - 2}]"
       def copyUpdates(r: Register) = (0 until copies(r)).map(g => s"${getName(r)}_r$g <= ${copySource(r)};")
-      def ramInstances(cur: RAM): Seq[String] = RAM.splitWidth match
-        case Some(w) if cur.size > w && (1 << cur.wr.size) >= RAM.blockDepth => Seq(getName(cur, 1), s"${getName(cur, 1)}_hi")
-        case _ => Seq(getName(cur, 1))
       def weName(inst: String) = if Register.maxFanout.isDefined then s"we_$inst" else "ram_we"
       val copyDeclarations = mod.components.flatMap {
         case cur: Register if replicated.contains(cur) => (0 until copies(cur)).map(g => s"(* keep = \"true\" *) reg ${width(cur)}${getName(cur)}_r$g;")
-        case cur if splitEmitted(cur) => finals(cur).map(_._1).distinct.map(f => s"wire ${width(cur)}${getName(cur)}_v${fid(f)};")
+        case cur if splitEmitted(cur) => finals(cur).map(_._1).distinct.map(f => s"wire ${width(cur)}${getName(cur)}_v${cid(f)};")
         case cur: RAM if Register.maxFanout.isDefined => ramInstances(cur).map(i => s"(* keep = \"true\" *) reg ${weName(i)} = 1'b0; // write enable of this RAM (see below)")
         case _ => Seq()
       }
       val copyInitial = mod.components.collect { case r: Register if replicated.contains(r) => (0 until copies(r)).map(g => s"${getName(r)}_r$g = 0;") }.flatten
       val splitAssignments = mod.components.filter(splitEmitted).flatMap(t => finals(t).map(_._1).distinct.map { f =>
         val rhs = t match
-          case Tap(input, range) => s"${ref(input, f)}[${if (range.size > 1) s"${range.last}:" else ""}${range.start}]"
-          case Concat(inputs) => inputs.map(ref(_, f)).mkString("{", ", ", "}")
+          case Tap(input, range) => s"${refp(input, f)}[${if (range.size > 1) s"${range.last}:" else ""}${range.start}]"
+          case Concat(inputs) => inputs.map(refp(_, f)).mkString("{", ", ", "}")
           case _ => throw Exception(s"Unexpected wire-only node $t")
-        s"  assign ${getName(t)}_v${fid(f)} = $rhs;\n"
+        s"  assign ${getName(t)}_v${cid(f)} = $rhs;\n"
       })
       val weUpdates = if Register.maxFanout.isDefined then mod.components.collect { case cur: RAM => ramInstances(cur).map(i => s"${weName(i)} <= ~$resetName;") }.flatten else Seq(s"ram_we <= ~$resetName;")
 
@@ -211,24 +244,20 @@ object Verilog {
           // the two ports never access the same address in the same cycle (true for the permutations generated by SGen, which read an
           // address before rewriting it). Vivado maps an XPM RAM whose write enable is a constant to READ_FIRST whatever the write mode
           // says, hence the registered enable. Distributed RAMs only support READ_FIRST.
-          val (primitive, writeMode) = if (1 << wr.size) >= RAM.blockDepth then ("block", "no_change") else ("distributed", "read_first")
-          def xpm(name: String, prim: String, mode: String, lo: Int, hi: Int, dout: String) = Seq(
+          // A block RAM word wider than a RAMB18's 36 bits (or a RAMB36's 72) takes the next primitive for a few bits: keep the
+          // first splitWidth bits in block RAM and the remainder in distributed RAM at the same addresses (-ramsplit); see pieces.
+          val ps = pieces(cur)
+          def xpm(pc: Piece) = Seq(
             "xpm_memory_sdpram #(",
-            s"  .ADDR_WIDTH_A(${wr.size}), .ADDR_WIDTH_B(${rd.size}), .WRITE_DATA_WIDTH_A(${hi - lo}), .BYTE_WRITE_WIDTH_A(${hi - lo}), .READ_DATA_WIDTH_B(${hi - lo}),",
-            s"  .MEMORY_SIZE(${(hi - lo) << wr.size}), .MEMORY_PRIMITIVE(\"$prim\"), .CLOCKING_MODE(\"common_clock\"),",
-            s"  .READ_LATENCY_B(${RAM.readLatency}), .WRITE_MODE_B(\"$mode\"), .SIM_ASSERT_CHK(0)",
-            s") $name (",
-            s"  .clka(clk), .ena(1'b1), .wea(${weName(name)}), .addra(${ref(wr, cur)}), .dina(${ref(data, cur)}[${hi - 1}:$lo]),",
-            s"  .clkb(clk), .enb(1'b1), .regceb(1'b1), .rstb(1'b0), .addrb(${ref(rd, cur)}), .doutb($dout),",
+            s"  .ADDR_WIDTH_A(${wr.size}), .ADDR_WIDTH_B(${rd.size}), .WRITE_DATA_WIDTH_A(${pc.hi - pc.lo}), .BYTE_WRITE_WIDTH_A(${pc.hi - pc.lo}), .READ_DATA_WIDTH_B(${pc.hi - pc.lo}),",
+            s"  .MEMORY_SIZE(${(pc.hi - pc.lo) << wr.size}), .MEMORY_PRIMITIVE(\"${if pc.block then "block" else "distributed"}\"), .CLOCKING_MODE(\"common_clock\"),",
+            s"  .READ_LATENCY_B(${RAM.readLatency}), .WRITE_MODE_B(\"${if pc.block then "no_change" else "read_first"}\"), .SIM_ASSERT_CHK(0)",
+            s") ${pc.name} (",
+            s"  .clka(clk), .ena(1'b1), .wea(${weName(pc.name)}), .addra(${refp(wr, (cur, 2 * pc.index + 1))}), .dina(${ref(data, cur)}[${pc.hi - 1}:${pc.lo}]),",
+            s"  .clkb(clk), .enb(1'b1), .regceb(1'b1), .rstb(1'b0), .addrb(${refp(rd, (cur, 2 * pc.index + 2))}), .doutb(${pc.dout}),",
             "  .sleep(1'b0), .injectsbiterra(1'b0), .injectdbiterra(1'b0), .sbiterrb(), .dbiterrb());")
-          RAM.splitWidth match
-            // A block RAM word wider than a RAMB18's 36 bits (or a RAMB36's 72) takes the next primitive for a few bits: keep the
-            // first splitWidth bits in block RAM and the remainder in distributed RAM at the same addresses (-ramsplit).
-            case Some(w) if primitive == "block" && cur.size > w && (1 << wr.size) >= RAM.blockDepth =>
-              Seq(s"wire [${w - 1}:0] ${getName(cur)}_lo; wire [${cur.size - w - 1}:0] ${getName(cur)}_hi; assign ${getName(cur)} = {${getName(cur)}_hi, ${getName(cur)}_lo};") ++
-                xpm(getName(cur, 1), "block", "no_change", 0, w, s"${getName(cur)}_lo") ++
-                xpm(s"${getName(cur, 1)}_hi", "distributed", "read_first", w, cur.size, s"${getName(cur)}_hi")
-            case _ => xpm(getName(cur, 1), primitive, writeMode, 0, cur.size, getName(cur))
+          val wires = if ps.size > 1 then Seq(ps.map(pc => s"wire [${pc.hi - pc.lo - 1}:0] ${pc.dout};").mkString(" ") + s" assign ${getName(cur)} = {${ps.reverse.map(_.dout).mkString(", ")}};") else Seq()
+          wires ++ ps.flatMap(xpm)
         case cur@BlockROM(values, address, _) =>
           val cfg = BlockRAMConfig(values.size, cur.size).get
           blockMemory(getName(cur), getName(cur, 1), cfg, cur.size, address.size, ref(address, cur), None, Some(values))
