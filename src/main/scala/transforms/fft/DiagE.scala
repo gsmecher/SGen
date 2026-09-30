@@ -27,8 +27,10 @@ import ir.rtl.hardwaretype.{ComplexHW, FixedPoint, HW}
 import ir.rtl.{AcyclicStreamingModule, StreamingModule,RAMControl}
 import ir.rtl.signals.{ROM, Sig, Timer}
 import ir.spl.{Identity, Repeatable, SPL}
-import maths.fields.Complex
+import maths.fields.{Complex, F2}
 import maths.fields.Complex._
+import maths.linalg.Matrix
+import transforms.perm.LinearPerm
 
 /**
  * Twiddle factors for non-iterative Cooley-Tukey FFTs
@@ -39,8 +41,11 @@ import maths.fields.Complex._
  * @param n Log of the size of the transform
  * @param r Log of the radix of the stage
  * @param s Number of bits already processed by the stages applied after this one (r times the stage number for a uniform radix)
+ * @param before The permutation this diagonal has been moved in front of, if any: the diagonal is defined on the
+ *               positions after that permutation, so the element at position j here gets the coefficient of position
+ *               P j (see CTDFT: a diagonal commutes with a permutation up to this re-indexing of its entries).
  */
-case class DiagE private (override val n: Int, r: Int, s: Int) extends SPL[Complex[Double]](n) with Repeatable[Complex[Double]]:
+case class DiagE private (override val n: Int, r: Int, s: Int, before: Option[Matrix[F2]]) extends SPL[Complex[Double]](n) with Repeatable[Complex[Double]]:
   val num = Numeric[Complex[Double]]
   import num._
   def pow(x: Int): Int =
@@ -48,7 +53,9 @@ case class DiagE private (override val n: Int, r: Int, s: Int) extends SPL[Compl
     val i = (x >> r) % (1 << (n - s - r))
     (i * j) << s
 
-  def coef(i: Int): Complex[Double] = DFT.omega(n, pow(i))
+  def coef(i: Int): Complex[Double] = DFT.omega(n, pow(before match
+    case Some(p) => LinearPerm.permute(p, i)
+    case None => i))
 
   override def eval(inputs: Seq[Complex[Double]], set: Int): Seq[Complex[Double]] = inputs.zipWithIndex.map((input, i) => input * coef(i % (1 << n)))
 
@@ -66,7 +73,7 @@ case class DiagE private (override val n: Int, r: Int, s: Int) extends SPL[Compl
 
     override def toString: String = "DiagE(" + this.n + "," + r + "," + s + "," + this.k + ")"
 
-    override def spl: SPL[Complex[Double]] = new DiagE(this.n, r, s)
+    override def spl: SPL[Complex[Double]] = new DiagE(this.n, r, s, before)
 
 /** Companion object of class DiagE */
 object DiagE:
@@ -91,13 +98,14 @@ object DiagE:
   /**
    * Twiddle factors of stage l of a mixed-radix Cooley-Tukey FFT.
    *
-   * @param n  Log of the size of the transform
-   * @param rs Log of the radix of each stage, stage 0 being the leftmost factor (i.e. the last one applied)
-   * @param l  Stage number
+   * @param n      Log of the size of the transform
+   * @param rs     Log of the radix of each stage, stage 0 being the leftmost factor (i.e. the last one applied)
+   * @param l      Stage number
+   * @param before The permutation this diagonal has been moved in front of, if any (see the class documentation)
    */
-  def apply(n: Int, rs: Seq[Int], l: Int): SPL[Complex[Double]] =
+  def apply(n: Int, rs: Seq[Int], l: Int, before: Option[Matrix[F2]] = None): SPL[Complex[Double]] =
     val s = rs.take(l).sum
     if n == s + rs(l) then
       Identity[Complex[Double]](n)
     else
-      new DiagE(n, rs(l), s)
+      new DiagE(n, rs(l), s, before)

@@ -142,7 +142,7 @@ case class FixedPoint(magnitude: Int, fractional: Int, saturating: Boolean = fal
    * so that it enters the adder as a carry input coming straight from a register (for a difference, as a third operand). For larger
    * shifts, ties are rare and half of the last kept bit is added before the shift.
    */
-  private case class FixAddShift(lhs: Sig[Double], rhs: Sig[Double], subtract: Boolean, shift: Int) extends Sig[Double](using lhs.hw):
+  private case class FixAddShift(val lhs: Sig[Double], val rhs: Sig[Double], val subtract: Boolean, val shift: Int) extends Sig[Double](using lhs.hw):
     override val hash: Int = Seq("FixAddShift", lhs, rhs, subtract, shift).hashCode()
 
     override def pipeline = 1
@@ -185,5 +185,4 @@ case class FixedPoint(magnitude: Int, fractional: Int, saturating: Boolean = fal
     case _ => s"FixedPoint($magnitude, $fractional)"
 
 object FixedPoint:
-  /** Whether the results of scaled butterflies are rounded to nearest rather than truncated */
   var rounding: Boolean = true

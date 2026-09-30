@@ -106,7 +106,12 @@ case class CTDFT(override val n: Int, rs: Seq[Int], scalingFactor: Complex[Doubl
       DFT2(scalingFactor)
     else
       val radices = rs.reverse // SPL factors, and the stage index l of DiagE, Qmat and Rmat, are in product order: the stage applied last comes first.
-      val stages = Product(radices.size)(l => ITensor(n - radices(l), CTDFT(radices(l), 1, scalingFactor).spl) * DiagE(n, radices, l) * Qmat(n, radices, l))
+      // Each stage twiddles, permutes and applies the butterflies of its radix. The textbook order twiddles after the
+      // permutation; a diagonal commutes with a permutation up to a re-indexing of its entries (DiagE.before), and placed
+      // in front of it the multipliers take the previous stage's butterfly outputs -- sums -- straight as their operands,
+      // which the DSP blocks add in their pre-adders (see FixedPoint). No switch sits between a butterfly
+      // and a multiplier.
+      val stages = Product(radices.size)(l => ITensor(n - radices(l), CTDFT(radices(l), 1, scalingFactor).spl) * Qmat(n, radices, l) * DiagE(n, radices, l, Some(Qmat(n, radices, l))))
       val withInput = inputOrder match
         case Order.Natural => stages * Rmat(n, radices)
         case Order.DigitReversed => stages
