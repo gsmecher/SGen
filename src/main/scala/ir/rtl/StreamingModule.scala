@@ -85,18 +85,25 @@ abstract class StreamingModule[U: HW](val t: Int, val k: Int) extends Module:
 
     def getToken(time: Int) = tokens.getOrElseUpdate(time, Wire(1))
 
+    // The data inputs and the reset enter through a register of their own, kept in the fabric (see inputDelay): a
+    // streaming module's first operation otherwise works straight off the port, and the registers it then depends on
+    // belong to the instantiating design, placed wherever that design put them (the inverse N=4096 core's first-stage
+    // adders, 17 failing endpoints at 625 MHz in build e0c578e).
+    val rst = reset.keepRegister
     // The data inputs go through wires, so that they can be delayed once the time at which the token is needed is known.
     val dataWires = dataInputs.map(i => Wire(i.size))
-    val res = implement(reset, getToken, dataWires).zipWithIndex.map { case (comp, i) => Output(comp, "o" + i) }
+    val res = implement(rst, getToken, dataWires).zipWithIndex.map { case (comp, i) => Output(comp, "o" + i) }
     val next_out = Output(getToken(latency), "next_out")
 
     // Time (in cycles after the first input) at which the token is first needed by the control logic.
     val minTime = tokens.keys.min
     // With StreamingModule.alignNext, next is asserted with the first input: if the control logic needs the token before the first
     // input, the data is delayed accordingly (at the cost of registers or shift-register LUTs), and if it needs it after, the token is.
-    val delay = if StreamingModule.alignNext then math.max(0, -minTime) else 0
-    dataWires.zip(dataInputs).foreach((w, i) => w.input = i.delay(delay))
-    val tokenStart = if StreamingModule.alignNext then math.min(minTime, 0) else minTime
+    // The input register is the first of that delay, or the whole of it when the control logic does not need one.
+    val alignDelay = if StreamingModule.alignNext then math.max(0, -minTime) else 0
+    val delay = math.max(alignDelay, 1)
+    dataWires.zip(dataInputs).foreach((w, i) => w.input = i.keepRegister.delay(delay - 1))
+    val tokenStart = (if StreamingModule.alignNext then math.min(minTime, 0) else minTime) - (delay - alignDelay)
 
     tokens.toSeq.sortBy(_._1).foldLeft[(Int,Component)]((tokenStart,next)){case ((prevTime, prevComp),(time, wire)) =>
       val diff= time-prevTime
@@ -117,7 +124,7 @@ abstract class StreamingModule[U: HW](val t: Int, val k: Int) extends Module:
       val active = new Wire(1)
       val valid = Or(Seq(token, active))
       val activeNext = Mux(token, Seq(Mux(Equals(index, Const(t, T - 1)), Seq(active, Const(1, 0))), Const(1, 1)))
-      active.input = Register(Mux(reset, Seq(activeNext, Const(1, 0)))) // cleared by reset, so that valid_out is defined before the first dataset
+      active.input = Register(Mux(rst, Seq(activeNext, Const(1, 0)))) // cleared by reset, so that valid_out is defined before the first dataset
       Seq(Output(index, "index_out"), Output(valid, "valid_out"))
     else Seq()
 
@@ -128,7 +135,8 @@ abstract class StreamingModule[U: HW](val t: Int, val k: Int) extends Module:
 
   private var _inputDelay: Option[Int] = None
 
-  /** Number of cycles the inputs are delayed by before entering the design (see StreamingModule.alignNext) */
+  /** Number of cycles the inputs are delayed by before entering the design: at least one (the input register), more
+   *  when the control logic needs the token before the first input (see StreamingModule.alignNext) */
   final def inputDelay: Int =
     if (_inputDelay.isEmpty) outputs
     _inputDelay.get
