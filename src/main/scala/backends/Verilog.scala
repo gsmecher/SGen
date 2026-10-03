@@ -419,8 +419,11 @@ object Verilog {
 
       val res = new StringBuilder
       res ++= "module test;\n"
-      res ++= "    reg clk,rst,next;\n"
-      sm.dataInputs.foreach(res ++= "    reg [" ++= (sm.hw.size - 1).toString ++= ":0] " ++= _.name ++= ";\n")
+      // The design's inputs are driven from time 0: left undefined until the first clock edge, `next` would enter the
+      // design's registered input as X, and the 0 -> X transition it causes on next_out satisfies @(posedge next_out)
+      // below, so that the outputs would be sampled before any dataset has entered the design.
+      res ++= "    reg clk = 0, rst = 0, next = 0;\n"
+      sm.dataInputs.foreach(res ++= "    reg [" ++= (sm.hw.size - 1).toString ++= ":0] " ++= _.name ++= " = 0;\n")
       res ++= "    wire next_out;\n"
       sm.dataOutputs.foreach(res ++= "    wire [" ++= (sm.hw.size - 1).toString ++= ":0] " ++= _.name ++= ";\n")
       res ++= "\n"
