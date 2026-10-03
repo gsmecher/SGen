@@ -54,8 +54,8 @@ class DFTTest extends AnyFunSuite:
   )
 
   val designs = Vector(
-    ("CT", CTDFT(_, _, 1), false, false),
-    ("ICT", ICTDFT(_, _, 1), false, true),
+    ("CT", (n: Int, r: Int) => CTDFT(n, r, 1), false, false),
+    ("ICT", (n: Int, r: Int) => ICTDFT(n, r, 1), false, true),
     ("Pease", Pease(_, _, 1), false, false),
     ("ItPease", ItPease(_, _, 1), true, false),
     ("ItPeaseFused", ItPeaseFused(_, _, 1), true, false),
@@ -78,7 +78,7 @@ class DFTTest extends AnyFunSuite:
         assert(v.norm2 < 0.00001)
 
   for
-    (name, uut) <- Vector(("ICT", ICTDFT(_, _, _)),("IItPeaseFused", IItPeaseFused(_, _, _)))
+    (name, uut) <- Vector(("ICT", (n: Int, r: Int, sf: Complex[Double]) => ICTDFT(n, r, sf)),("IItPeaseFused", (n: Int, r: Int, sf: Complex[Double]) => IItPeaseFused(n, r, sf)))
     n <- 1 to 10
     r <- 1 until n if n % r == 0
   do
@@ -122,3 +122,54 @@ class DFTTest extends AnyFunSuite:
     val description = s"$name FFT (size 2^$n, 2^$k ports, radix 2^$r, $dp RAM banks, $hw)"
     test(s"Generating testbench for $description", Tag("synthesis")):
       uut(n, r).stream(k, dp)(using hw).synthetize(s"$name-$n-$r-$k-$dp-$inner")
+
+  // Mixed-radix Cooley-Tukey FFTs. Radices are listed in the order the stages are applied to the data.
+  test("Greedy radix decomposition"):
+    assert(DFT.greedyRadices(9, 3) == Seq(3, 3, 3))
+    assert(DFT.greedyRadices(11, 3) == Seq(3, 3, 3, 2))
+    assert(DFT.greedyRadices(10, 4) == Seq(4, 4, 2))
+    assert(DFT.greedyRadices(5, 8) == Seq(5))
+    assert(DFT.greedyRadices(7, 1) == Seq.fill(7)(1))
+    assert(CTDFT(11, 3, 1) == CTDFT(11, Seq(3, 3, 3, 2), 1))
+
+  val mixedRadices = Vector(Seq(3, 2), Seq(2, 3), Seq(1, 3), Seq(3, 1), Seq(3, 3, 1), Seq(1, 3, 3), Seq(3, 1, 3), Seq(2, 1, 3), Seq(1, 2, 3), Seq(3, 2, 1), Seq(3, 3, 2), Seq(2, 2, 3, 1), Seq(4, 3, 2, 1), Seq(3, 3, 3, 1))
+
+  for
+    (name, uut, inverse) <- Vector(("CT", (n: Int, rs: Seq[Int]) => CTDFT(n, rs, 1), false), ("ICT", (n: Int, rs: Seq[Int]) => ICTDFT(n, rs, 1), true))
+    rs <- mixedRadices
+    n = rs.sum
+  do
+    test(s"Checking mixed-radix $name FFT (size ${1 << n} radices ${rs.map(1 << _).mkString(",")})"):
+      val sb = uut(n, rs)
+      for
+        j <- (0 until 1 << n).par
+        res = sb.eval(Seq.tabulate(1 << n)(i => if (i == j) 1.0 else 0.0), 0).toVector
+        i <- 0 until 1 << n
+      do
+        val v = res(i) - (if inverse then DFT.omega(n, -i * j) else DFT.omega(n, i * j))
+        assert(v.norm2 < 0.00001)
+
+  for
+    rs <- mixedRadices if rs.sum <= 7
+    n = rs.sum
+    k <- 1 to 3
+    dft = CTDFT(n, rs, 1)
+    inner <- Vector(FixedPoint(16, 0), Flopoco(8, 23), IEEE754(8, 23))
+    hw = ComplexHW(inner) if dft.testParams.isDefinedAt(hw)
+    dp <- RAMControl.values
+  do
+    val description = s"mixed-radix CT FFT (size 2^$n, 2^$k ports, radices ${rs.map(1 << _).mkString(",")}, $dp RAM banks, $hw)"
+    test(s"Generating $description", Tag("simulation")):
+      dft.test(k, dp, hw, s"MixedCT-$n-${rs.mkString("")}-$k-$dp-$inner")
+
+  for
+    rs <- Vector(Seq(3, 2), Seq(2, 3), Seq(3, 1, 1), Seq(1, 1, 3))
+    n = rs.sum
+    k <- 1 to 3
+    inner <- Vector(FixedPoint(16, 0))
+    hw = ComplexHW(inner)
+    dp <- RAMControl.values
+  do
+    val description = s"mixed-radix CT FFT (size 2^$n, 2^$k ports, radices ${rs.map(1 << _).mkString(",")}, $dp RAM banks, $hw)"
+    test(s"Generating testbench for $description", Tag("synthesis")):
+      CTDFT(n, rs, 1).stream(k, dp)(using hw).synthetize(s"MixedCT-$n-${rs.mkString("")}-$k-$dp-$inner")

@@ -95,15 +95,47 @@ object LinearPerm:
 
   def permute(P: Matrix[F2], i: Int): Int = (P * Vec.fromInt(P.m, i)).toInt
 
-  def Rmat(r: Int, n: Int): Matrix[F2] = (0 until n / r).map(l => Matrix.identity[F2](n - r * (l + 1)) oplus Lmat(r, r * (l + 1))).reduceLeft(_ * _)
+  /** Digit reversal of n bits grouped in digits of r bits (bit reversal if r == 1). r must divide n. */
+  def Rmat(r: Int, n: Int): Matrix[F2] =
+    require(n % r == 0, s"n ($n) must be a multiple of r ($r)")
+    Rmat(n, Seq.fill(n / r)(r))
+
+  /**
+   * Mixed-radix digit reversal, as used at the input of a Cooley-Tukey FFT with radices 2^rs(l). Digit l of the output
+   * has rs(l) bits, from the most significant digit (l = 0) to the least significant one; the corresponding digits of
+   * the input are taken from the least significant one. For a uniform radix, this is Rmat(r, n).
+   *
+   * Step m (applied in increasing order of m) rotates the n - s_m least significant bits (s_m = rs(0) + ... + rs(m - 1))
+   * so that input digit m (then at the bottom) lands just below the digits already placed.
+   */
+  def Rmat(n: Int, rs: Seq[Int]): Matrix[F2] =
+    require(rs.nonEmpty && rs.forall(_ > 0) && rs.sum == n, s"radices ($rs) must be strictly positive and sum up to n ($n)")
+    val s = rs.scanLeft(0)(_ + _)
+    rs.indices.map(m => Matrix.identity[F2](s(m)) oplus Lmat(rs(m), n - s(m))).reverse.reduceLeft(_ * _)
 
   def Lmat(m: Int, n: Int): Matrix[F2] = Cmat(n) ^ (n - m)
 
   def Cmat(n: Int): Matrix[F2] = Matrix.tabulate[F2](n, n)((i, j) => F2((i + 1) % n == j))
 
-  def Qmat(n: Int, r: Int, l: Int): Matrix[F2] =
-    val mat1 = Matrix.identity[F2](r * l) oplus Lmat(n - r * (l + 1), n - r * l)
-    val mat2 = Matrix.identity[F2](r * (l + 1)) oplus Lmat(r, n - r * (l + 1))
+  /** Permutation preceding stage l of a uniform radix-2^r Cooley-Tukey FFT. */
+  def Qmat(n: Int, r: Int, l: Int): Matrix[F2] = Qmat(n, Seq.fill(n / r)(r), l)
+
+  /**
+   * Permutation preceding stage l of a mixed-radix Cooley-Tukey FFT with radices 2^rs(l), stage 0 being the leftmost
+   * factor (i.e. the last one applied).
+   *
+   * Before this permutation, the data consists (from the most significant bits) of the s_l group bits, the frequency index
+   * of the sub-transforms computed so far, and the rs(l + 1) bits output by the butterflies of the previous stage. The
+   * second factor rotates the latter to the top of the frequency index; the first factor rotates the lowest group digit
+   * (the rs(l) bits to be combined by this stage) down to the butterfly position.
+   */
+  def Qmat(n: Int, rs: Seq[Int], l: Int): Matrix[F2] =
+    val s = rs.take(l).sum
+    val r = rs(l)
+    val c = n - s - r // bits of the sub-transforms computed before this stage
+    val rNext = if l + 1 < rs.size then rs(l + 1) else 0
+    val mat1 = Matrix.identity[F2](s) oplus Lmat(c, n - s)
+    val mat2 = Matrix.identity[F2](s + r) oplus Lmat(rNext, c)
     mat1 * mat2
-    
+
   def stream[T](matrices: Seq[Matrix[F2]], k: Int, hw: HW[T], control:RAMControl): StreamingModule[T] = LinearPerm[T](matrices).stream(k,control)(using hw)

@@ -66,12 +66,21 @@ object Main:
       case _ => n
     def k_=(value:Int) = _k = Some(value)
 
-    var _r: Option[Int] = None
+    var _r: Option[Seq[Int]] = None
+    /** Radix for designs that require a uniform one (compact DFTs, WHTs, bit reversals and strides). */
     def r: Int = _r match
-      case Some(r) if r > 0 && r <= n => r
-      case Some(r) => throw new IllegalArgumentException(s"Parameter r should be a strictly positive integer lower or equal to n.")
+      case Some(Seq(r)) if r > 0 && r <= n => r
+      case Some(Seq(_)) => throw new IllegalArgumentException(s"Parameter r should be a strictly positive integer lower or equal to n.")
+      case Some(_) => throw new IllegalArgumentException("A list of radices is only supported by Cooley-Tukey DFTs (dft and idft).")
       case _ => (1 to k).reverse.filter(n % _ == 0).head
-    def r_=(value:Int) = _r = Some(value)
+    /** Radices of the stages of a Cooley-Tukey DFT: the list given, or the radix given (2^k by default) used as often as possible. */
+    def rs: Seq[Int] = _r match
+      case Some(Seq(r)) if r > 0 && r <= n => DFT.greedyRadices(n, r)
+      case Some(Seq(_)) => throw new IllegalArgumentException(s"Parameter r should be a strictly positive integer lower or equal to n.")
+      case Some(rs) if rs.forall(_ > 0) && rs.sum == n => rs
+      case Some(rs) => throw new IllegalArgumentException(s"Radices should be strictly positive integers with a sum equal to n ($n).")
+      case _ => DFT.greedyRadices(n, k)
+    def r_=(value:Int) = _r = Some(Seq(value))
 
     var _hw: Option[HW[?]] = None
     def hw: HW[?] = _hw match
@@ -128,7 +137,7 @@ object Main:
     while argsQ.nonEmpty do argsQ.dequeue().toLowerCase match
       case "-n" => _n = Numeric[Int].parseString(argsQ.dequeue())
       case "-k" => _k = Numeric[Int].parseString(argsQ.dequeue())
-      case "-r" => _r = Numeric[Int].parseString(argsQ.dequeue())
+      case "-r" => _r = Some(argsQ.dequeue().split(',').toSeq.map(s => Numeric[Int].parseString(s.trim).getOrElse(throw new IllegalArgumentException(s"Invalid radix: $s"))))
       case "-hw" => _hw = parseHW(argsQ)
       case "-o" => _filename = argsQ.removeHeadOption()
       case "-sf" => scalingFactor = argsQ.dequeue()
@@ -157,13 +166,13 @@ object Main:
       case "wht" => finish(wht.CTWHT(n, r, hw.num.parseString(scalingFactor).get)(using hw.num), hw.asInstanceOf)
       case "whtcompact" => finish(wht.ItPeaseFused(n, r, hw.num.parseString(scalingFactor).get)(using hw.num), hw.asInstanceOf)
       case "dft" => hw match
-        case hw: ComplexHW[Double@unchecked] => finish(CTDFT(n, r, hw.num.parseString(scalingFactor).get), hw)
+        case hw: ComplexHW[Double@unchecked] => finish(CTDFT(n, rs, hw.num.parseString(scalingFactor).get), hw)
         case _ => throw new IllegalArgumentException("DFT requires a complex of fractional hardware datatype.")
       case "dftcompact" => hw match
         case hw: ComplexHW[Double@unchecked] => finish(ItPeaseFused(n, r, hw.num.parseString(scalingFactor).get), hw)
         case _ => throw new IllegalArgumentException("Compact DFT requires a complex of fractional hardware datatype.")
       case "idft" => hw match
-        case hw: ComplexHW[Double@unchecked] => finish(ICTDFT(n, r, hw.num.parseString(scalingFactor).get), hw)
+        case hw: ComplexHW[Double@unchecked] => finish(ICTDFT(n, rs, hw.num.parseString(scalingFactor).get), hw)
         case _ => throw new IllegalArgumentException("iDFT requires a complex of fractional hardware datatype.")
       case "idftcompact" => hw match
         case hw: ComplexHW[Double@unchecked] => finish(IItPeaseFused(n, r, hw.num.parseString(scalingFactor).get), hw)

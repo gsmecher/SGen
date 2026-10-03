@@ -32,18 +32,21 @@ import maths.fields.Complex._
 
 /**
  * Twiddle factors for non-iterative Cooley-Tukey FFTs
- * 
+ *
+ * The stage combines 2^r sub-transforms of size 2^(n - s - r) into transforms of size 2^(n - s), and therefore multiplies
+ * by powers of the 2^(n - s)-th root of unity. The s most significant bits index the groups and are left untouched.
+ *
  * @param n Log of the size of the transform
- * @param r Log of the radix
- * @param l Stage number
+ * @param r Log of the radix of the stage
+ * @param s Number of bits already processed by the stages applied after this one (r times the stage number for a uniform radix)
  */
-case class DiagE private (override val n: Int, r: Int, l: Int) extends SPL[Complex[Double]](n) with Repeatable[Complex[Double]]:
+case class DiagE private (override val n: Int, r: Int, s: Int) extends SPL[Complex[Double]](n) with Repeatable[Complex[Double]]:
   val num = Numeric[Complex[Double]]
   import num._
-  def pow(x: Int): Int = 
+  def pow(x: Int): Int =
     val j = x % (1 << r)
-    val i = (x >> r) % (1 << (n - r * (l + 1)))
-    (i * j) << (r * l)
+    val i = (x >> r) % (1 << (n - s - r))
+    (i * j) << s
 
   def coef(i: Int): Complex[Double] = DFT.omega(n, pow(i))
 
@@ -59,14 +62,31 @@ case class DiagE private (override val n: Int, r: Int, l: Int) extends SPL[Compl
       val twiddle = ROM(twiddles, control)(using twiddleHW)
       inputs(p) * twiddle)
 
-    override def toString: String = "DiagE(" + this.n + "," + r + "," + l + "," + this.k + ")"
+    override def toString: String = "DiagE(" + this.n + "," + r + "," + s + "," + this.k + ")"
 
-    override def spl: SPL[Complex[Double]] = DiagE(this.n, r, l)
-  
+    override def spl: SPL[Complex[Double]] = new DiagE(this.n, r, s)
+
 /** Companion object of class DiagE */
 object DiagE:
-  def apply(n: Int, r: Int, l: Int):SPL[Complex[Double]]=
-    if n == r * (l + 1) then
-      Identity[Complex[Double]](n) 
+  /**
+   * Twiddle factors of stage l of a uniform radix-2^r Cooley-Tukey FFT.
+   *
+   * @param n Log of the size of the transform
+   * @param r Log of the radix
+   * @param l Stage number
+   */
+  def apply(n: Int, r: Int, l: Int): SPL[Complex[Double]] = apply(n, Seq.fill(n / r)(r), l)
+
+  /**
+   * Twiddle factors of stage l of a mixed-radix Cooley-Tukey FFT.
+   *
+   * @param n  Log of the size of the transform
+   * @param rs Log of the radix of each stage, stage 0 being the leftmost factor (i.e. the last one applied)
+   * @param l  Stage number
+   */
+  def apply(n: Int, rs: Seq[Int], l: Int): SPL[Complex[Double]] =
+    val s = rs.take(l).sum
+    if n == s + rs(l) then
+      Identity[Complex[Double]](n)
     else
-      new DiagE(n, r, l)
+      new DiagE(n, rs(l), s)

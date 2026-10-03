@@ -50,9 +50,21 @@ object DFT:
      val angle = -2 * Math.PI * pow / (1 << n)
      Complex(Math.cos(angle), Math.sin(angle))
 
-abstract class DFT(n: Int, r: Int) extends HighLevelTransform[Complex[Double]](n):
-  require(n % r == 0, s"n ($n) must be a multiple of r ($r)")
+  /**
+   * Radices of a mixed-radix Cooley-Tukey FFT that uses the radix 2^rMax as often as possible. The remainder, if any,
+   * forms the last stage: the first stage requires no twiddle factors whatever its radix, so the stage without twiddles
+   * should be one of the large radix (the smaller permutations following a small last stage cost much less).
+   *
+   * @param n    Log of the size of the transform
+   * @param rMax Log of the preferred radix
+   * @return Log of the radix of each stage, in the order the stages are applied to the data
+   */
+  def greedyRadices(n: Int, rMax: Int): Seq[Int] =
+    require(n > 0 && rMax > 0, s"n ($n) and rMax ($rMax) must be strictly positive")
+    val r = Math.min(n, rMax)
+    Seq.fill(n / r)(r) ++ (if n % r == 0 then Seq() else Seq(n % r))
 
+abstract class DFT(n: Int) extends HighLevelTransform[Complex[Double]](n):
   override def testParams: PartialFunction[HW[Complex[Double]], (Seq[Complex[Double]], Double)] =
     case ComplexHW(hw@FixedPoint(magnitude, fractional)) if hw.MID_VALUE*(1<<n) <= hw.MAX_VALUE => (testInputs(hw), (BigInt(1)<<(n + 1)).toDouble / (BigInt(1) << fractional).toDouble)
     case ComplexHW(hw@Flopoco(wE, wF)) if wE <= 11 && wF <= 52 && hw.MID_VALUE * (1 << n) <= hw.MAX_VALUE => (testInputs(hw), (BigInt(1) << (n + 1)).toDouble / (BigInt(1) << wF).toDouble)
@@ -65,39 +77,62 @@ abstract class DFT(n: Int, r: Int) extends HighLevelTransform[Complex[Double]](n
     val inputs3 = Seq.tabulate(1 << n)(k => if k == 0 then Complex(hw.MID_VALUE) else Complex(0.0)) // Fourth set is a dirac
     inputs0 ++ inputs1 ++ inputs2 ++ inputs3
   
-case class CTDFT(override val n: Int, r: Int, scalingFactor: Complex[Double]) extends DFT(n, r):
-  override val spl: SPL[Complex[Double]] = 
+/**
+ * Mixed-radix Cooley-Tukey FFT.
+ *
+ * @param n             Log of the size of the transform
+ * @param rs            Log of the radix of each stage, in the order the stages are applied to the data (the first stage
+ *                      requires no twiddle factors). The sum must be n.
+ * @param scalingFactor Scaling factor applied by each radix-2 butterfly
+ */
+case class CTDFT(override val n: Int, rs: Seq[Int], scalingFactor: Complex[Double]) extends DFT(n):
+  require(rs.nonEmpty && rs.forall(_ > 0) && rs.sum == n, s"radices ($rs) must be strictly positive and sum up to n ($n)")
+
+  override val spl: SPL[Complex[Double]] =
     if n == 1 then
       DFT2(scalingFactor)
     else
-      Lmat(r, n) * Product(n / r)(l => ITensor(n - r, CTDFT(r, 1, scalingFactor).spl) * DiagE(n, r, l) * Qmat(n, r, l)) * Rmat(r, n)
+      val stages = rs.reverse // SPL factors, and the stage index l of DiagE, Qmat and Rmat, are in product order: the stage applied last comes first.
+      Lmat(stages.head, n) * Product(stages.size)(l => ITensor(n - stages(l), CTDFT(stages(l), 1, scalingFactor).spl) * DiagE(n, stages, l) * Qmat(n, stages, l)) * Rmat(n, stages)
 
-case class ICTDFT(override val n: Int, r: Int, scalingFactor: Complex[Double]) extends DFT(n, r):
-  override val spl: SPL[Complex[Double]] = Swap(n) * CTDFT(n, r, scalingFactor).spl * Swap(n)
+object CTDFT:
+  /** Cooley-Tukey FFT using the radix 2^r as often as possible (uniform radix-2^r FFT if r divides n). */
+  def apply(n: Int, r: Int, scalingFactor: Complex[Double]): CTDFT = CTDFT(n, DFT.greedyRadices(n, r), scalingFactor)
 
-case class Pease(override val n: Int, r: Int, scalingFactor: Complex[Double]) extends DFT(n, r):
+/** Mixed-radix inverse Cooley-Tukey FFT, see [[CTDFT]]. */
+case class ICTDFT(override val n: Int, rs: Seq[Int], scalingFactor: Complex[Double]) extends DFT(n):
+  override val spl: SPL[Complex[Double]] = Swap(n) * CTDFT(n, rs, scalingFactor).spl * Swap(n)
+
+object ICTDFT:
+  /** Inverse Cooley-Tukey FFT using the radix 2^r as often as possible (uniform radix-2^r FFT if r divides n). */
+  def apply(n: Int, r: Int, scalingFactor: Complex[Double]): ICTDFT = ICTDFT(n, DFT.greedyRadices(n, r), scalingFactor)
+
+case class Pease(override val n: Int, r: Int, scalingFactor: Complex[Double]) extends DFT(n):
+  require(n % r == 0, s"n ($n) must be a multiple of r ($r)")
   override val spl: SPL[Complex[Double]] =
     if n == 1 then
       DFT2(scalingFactor)
     else
       Rmat(r, n) * Product(n / r)(l => DiagC(n, r, n / r - l - 1) * ITensor(n - r, CTDFT(r, 1, scalingFactor).spl) * Lmat(r, n).inverse)
     
-case class ItPease(override val n: Int, r: Int, scalingFactor: Complex[Double]) extends DFT(n, r):
+case class ItPease(override val n: Int, r: Int, scalingFactor: Complex[Double]) extends DFT(n):
+  require(n % r == 0, s"n ($n) must be a multiple of r ($r)")
   override val spl =
     if n == 1 then
       DFT2(scalingFactor)
     else
       Rmat(r, n) * ItProduct(n / r, StreamDiagC(n, r) * ITensor(n - r, CTDFT(r, 1, scalingFactor).spl) * Lmat(r, n).inverse)
 
-case class ItPeaseFused(override val n: Int, r: Int, scalingFactor: Complex[Double]) extends DFT(n, r):
-  override val spl = 
+case class ItPeaseFused(override val n: Int, r: Int, scalingFactor: Complex[Double]) extends DFT(n):
+  require(n % r == 0, s"n ($n) must be a multiple of r ($r)")
+  override val spl =
     if n == 1 then
       DFT2(scalingFactor)
     else
       ItProduct(n / r + 1, perm.LinearPerm(Seq.fill(n / r)(Lmat(r, n).inverse) :+ Rmat(r, n)), Some(StreamDiagC(n, r) * ITensor(n - r, CTDFT(r, 1, scalingFactor).spl)))
   //def stream(n: Int, r: Int, k: Int, hw: HW[Complex[Double]],dualPorted:Boolean): StreamingModule[Complex[Double]] = CTDFT(n, r).stream(k)(hw)
 
-case class IItPeaseFused(override val n: Int, r: Int, scalingFactor: Complex[Double]) extends DFT(n, r):
+case class IItPeaseFused(override val n: Int, r: Int, scalingFactor: Complex[Double]) extends DFT(n):
   override val spl = Swap(n) * ItPeaseFused(n, r, scalingFactor) * Swap(n)
 
 /** Dummy module used for representation in graphs 
